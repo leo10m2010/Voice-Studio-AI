@@ -1,4 +1,4 @@
-name: Validate
+name: "01 · Validar código (no publica Release)"
 
 on:
   push:
@@ -14,40 +14,43 @@ permissions:
 
 jobs:
   validate:
-    name: Validate frontend and source
+    name: Validar frontend y código fuente
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - name: Setup Node 24
+        uses: actions/setup-node@v6
         with:
           node-version: "24"
+          package-manager-cache: false
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
-      - name: Install frontend dependencies
+      - name: Instalar dependencias frontend
         shell: pwsh
         run: npm install
 
-      - name: Check synchronized version
+      - name: Comprobar versiones sincronizadas
         shell: pwsh
         run: powershell -ExecutionPolicy Bypass -File .\scripts\check-release-version.ps1
 
-      - name: Check JavaScript syntax
+      - name: Comprobar JavaScript
         shell: pwsh
         run: node --check .\src\main.js
 
-      - name: Check Python syntax
+      - name: Comprobar Python
         shell: pwsh
         run: |
           python -c "from pathlib import Path; p=Path('engine/server.py'); compile(p.read_text(encoding='utf-8'), str(p), 'exec'); print('engine/server.py: OK')"
+          python -c "from pathlib import Path; p=Path('engine/audio_mix.py'); compile(p.read_text(encoding='utf-8'), str(p), 'exec'); print('engine/audio_mix.py: OK')"
+          python -c "from pathlib import Path; p=Path('engine/audio_ingest.py'); compile(p.read_text(encoding='utf-8'), str(p), 'exec'); print('engine/audio_ingest.py: OK')"
 
       - name: Build frontend
         shell: pwsh

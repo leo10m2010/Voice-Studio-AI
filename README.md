@@ -553,3 +553,21 @@ Prueba local del mezclador:
 # V0.6.8 — Music decoder fix
 
 Las músicas importadas se validan y convierten a WAV PCM16 44.1 kHz. Usa `Reparar biblioteca de música` una vez después de actualizar desde v0.6.7.
+
+
+---
+
+# V0.6.9 — GitHub Release workflow fix
+
+GitHub Actions now clearly separates validation from publishing:
+
+- `01 · Validar código (no publica Release)`
+- `02 · Crear instalador Windows y publicar Release`
+
+The release workflow can run from a `v*` tag or manually from Actions.
+It derives the release tag from `package.json`, publishes the NSIS setup
+through `tauri-apps/tauri-action@v1`, uploads a workflow artifact, and finally
+verifies the GitHub Release with `gh release view`.
+
+Official GitHub actions were updated to Node 24-compatible majors:
+checkout v6, setup-node v6 and setup-python v6.

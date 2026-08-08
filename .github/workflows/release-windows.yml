@@ -1,4 +1,4 @@
-name: Build and Release Windows
+name: "02 · Crear instalador Windows y publicar Release"
 
 on:
   push:
@@ -10,84 +10,127 @@ permissions:
   contents: write
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: windows-release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   windows-release:
-    name: Build Windows NSIS
+    name: Compilar Setup.exe y publicarlo
     runs-on: windows-latest
-    timeout-minutes: 120
+    timeout-minutes: 150
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - name: Setup Node 24
+        uses: actions/setup-node@v6
         with:
           node-version: "24"
+          package-manager-cache: false
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: "pip"
           cache-dependency-path: engine/requirements.txt
 
-      - name: Setup Rust stable
+      - name: Setup Rust estable
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache Rust
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: "./src-tauri -> target"
+      - name: Resolver versión y tag de Release
+        id: meta
+        shell: pwsh
+        run: |
+          $package = Get-Content "package.json" -Raw | ConvertFrom-Json
+          $version = [string]$package.version
+          $tag = "v$version"
 
-      - name: Verify release version
+          if ($env:GITHUB_REF_TYPE -eq "tag" -and $env:GITHUB_REF_NAME -ne $tag) {
+            throw "El tag '$env:GITHUB_REF_NAME' no coincide con la versión '$tag' de package.json."
+          }
+
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+
+          Write-Host "Versión: $version"
+          Write-Host "Release tag: $tag"
+
+      - name: Comprobar versiones sincronizadas
         shell: pwsh
         run: powershell -ExecutionPolicy Bypass -File .\scripts\check-release-version.ps1
 
-      - name: Install frontend dependencies
+      - name: Instalar dependencias frontend
         shell: pwsh
         run: npm install
 
-      - name: Prepare bundled Python + CUDA engine
+      - name: Preparar motor Python + PyTorch CUDA
         shell: pwsh
         run: powershell -ExecutionPolicy Bypass -File .\scripts\prepare-release-engine.ps1
 
-      - name: Verify bundled engine exists
+      - name: Comprobar sidecar del motor
         shell: pwsh
         run: |
-          if (-not (Test-Path ".\engine-dist\qwen-engine\qwen-engine.exe")) {
-            throw "PyInstaller no genero engine-dist\qwen-engine\qwen-engine.exe"
+          $engine = ".\engine-dist\qwen-engine\qwen-engine.exe"
+          if (-not (Test-Path $engine)) {
+            throw "No se generó $engine"
           }
-          Get-ChildItem ".\engine-dist\qwen-engine\qwen-engine.exe"
+          Get-Item $engine | Format-List FullName, Length
 
-      - name: Build NSIS and publish GitHub Release
+      - name: Compilar NSIS y publicar GitHub Release
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: v__VERSION__
-          releaseName: "Voice Studio AI v__VERSION__"
+          tagName: ${{ steps.meta.outputs.tag }}
+          releaseName: "Voice Studio AI v${{ steps.meta.outputs.version }}"
           releaseBody: |
-            ## Voice Studio AI v__VERSION__
+            ## Voice Studio AI v${{ steps.meta.outputs.version }}
 
             ### Windows
             Descarga el archivo `*-setup.exe`.
 
-            El instalador incluye la aplicación y el motor local:
-            - Python runtime empaquetado
-            - PyTorch / CUDA runtime
-            - Qwen TTS engine
+            El instalador incluye:
+            - Voice Studio AI
+            - motor Python empaquetado
+            - PyTorch / runtime CUDA
+            - qwen-tts
             - dependencias de audio
 
-            Los pesos de los modelos no están incluidos.
-            La primera vez que selecciones un modelo, Voice Studio AI lo descargará y lo guardará en la caché local.
+            Los pesos de los modelos se descargan desde la aplicación la primera vez
+            y quedan guardados en la caché local.
 
-            **NVIDIA:** no es necesario instalar CUDA Toolkit, pero para usar GPU necesitas un driver NVIDIA compatible.
+            **GPU NVIDIA:** no necesitas instalar CUDA Toolkit. Sí necesitas un driver
+            NVIDIA compatible para usar aceleración por GPU.
           generateReleaseNotes: true
           releaseDraft: false
           prerelease: false
           args: --bundles nsis
           releaseAssetNamePattern: "Voice-Studio-AI_[version]_Windows_[arch][setup].[ext]"
+          uploadWorkflowArtifacts: true
+          workflowArtifactNamePattern: "Voice-Studio-AI_[version]_Windows_[arch]"
+
+      - name: Verificar que la Release realmente existe
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          Write-Host "Verificando Release $env:RELEASE_TAG ..."
+          gh release view "$env:RELEASE_TAG" `
+            --repo "${{ github.repository }}" `
+            --json tagName,name,url,assets
+
+      - name: Resumen
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          "## ✅ Release publicada" >> $env:GITHUB_STEP_SUMMARY
+          "" >> $env:GITHUB_STEP_SUMMARY
+          "- Tag: ``$env:RELEASE_TAG``" >> $env:GITHUB_STEP_SUMMARY
+          "- Repositorio: ``${{ github.repository }}``" >> $env:GITHUB_STEP_SUMMARY
+          "- El instalador también queda guardado como artifact del workflow." >> $env:GITHUB_STEP_SUMMARY

@@ -122,3 +122,68 @@ Si el setup final se acercara al límite, la siguiente optimización sería sepa
 - o usar un engine bootstrap instalado la primera vez.
 
 Por ahora el diseño objetivo sigue siendo un único instalador + descarga posterior únicamente de modelos.
+
+
+---
+
+# v0.6.9 — Flujo de Release corregido
+
+Hay dos workflows deliberadamente separados:
+
+## 01 · Validar código (no publica Release)
+
+Se ejecuta en pushes y PR.
+
+Su trabajo termina después de validar/build del frontend.
+**Nunca publica una GitHub Release.**
+
+## 02 · Crear instalador Windows y publicar Release
+
+Este es el workflow que genera el instalador.
+
+Puede iniciarse de dos formas:
+
+### Opción A — automática por tag
+
+```powershell
+git add .
+git commit -m "Release v0.6.9"
+git push origin main
+
+git tag v0.6.9
+git push origin v0.6.9
+```
+
+### Opción B — botón de GitHub
+
+GitHub:
+`Actions → 02 · Crear instalador Windows y publicar Release → Run workflow`
+
+No necesitas crear el tag manualmente en esta modalidad.
+El workflow lee `package.json` y usa `v0.6.9` como tag de la Release.
+
+## Verificación
+
+El workflow no se limita a confiar en que la publicación funcionó.
+
+Al finalizar ejecuta:
+
+```text
+gh release view <tag>
+```
+
+Si GitHub no puede encontrar la Release, el job falla.
+
+Además, `tauri-action` guarda el instalador como workflow artifact para que
+sea visible también dentro de la ejecución.
+
+## Node 24
+
+Los actions oficiales se actualizaron a:
+
+- `actions/checkout@v6`
+- `actions/setup-node@v6`
+- `actions/setup-python@v6`
+
+Estas versiones utilizan Node 24 y evitan la advertencia de Node 20 de
+los runners actuales de GitHub.
