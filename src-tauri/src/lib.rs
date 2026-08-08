@@ -709,7 +709,7 @@ fn spawn_engine(_app: &AppHandle) -> Result<Child, String> {
             ));
         }
 
-        let mut command = Command::new(python);
+        let mut command = Command::new(&python);
         command
             .arg(script)
             .current_dir(&root)
