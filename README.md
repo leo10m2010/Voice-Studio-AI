@@ -603,3 +603,18 @@ npm run release:pretag
 ```
 
 Create a fresh tag only after the fixed commit is already pushed.
+
+
+---
+
+# V0.6.12 - GitHub Actions YAML fix
+
+Both workflows were rewritten and syntax-validated as YAML.
+
+Expected entries in GitHub Actions after pushing to the default branch:
+
+- `01 - Validar codigo`
+- `02 - Crear instalador Windows y publicar Release`
+
+The second workflow supports both manual `workflow_dispatch` and automatic
+execution on `v*` tags.

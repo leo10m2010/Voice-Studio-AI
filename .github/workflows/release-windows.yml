@@ -1,4 +1,4 @@
-name: "02 · Crear instalador Windows y publicar Release"
+name: "02 - Crear instalador Windows y publicar Release"
 
 on:
   push:
@@ -15,9 +15,9 @@ concurrency:
 
 jobs:
   windows-release:
-    name: Compilar Setup.exe y publicarlo
+    name: "Compilar Setup.exe y publicar Release"
     runs-on: windows-latest
-    timeout-minutes: 150
+    timeout-minutes: 180
 
     steps:
       - name: Checkout
@@ -38,71 +38,55 @@ jobs:
           cache: "pip"
           cache-dependency-path: engine/requirements.txt
 
-      - name: Setup Rust estable
+      - name: Setup Rust stable
         uses: dtolnay/rust-toolchain@stable
 
       - name: Verificar commit y fix Rust
         shell: pwsh
         run: |
-          Write-Host "Commit que se está compilando:"
+          Write-Host "Commit que se compilara:"
           git rev-parse HEAD
-          git log -1 --oneline
+          git log -1 --decorate --oneline
 
           $rust = Get-Content ".\src-tauri\src\lib.rs" -Raw
 
-          Write-Host ""
-          Write-Host "Fragmento de cierre del engine:"
-          Get-Content ".\src-tauri\src\lib.rs" |
-            Select-String -Pattern "take_engine_child|terminate_engine|window.state" -Context 2,4
-
           if ($rust.Contains("if let Ok(mut guard) = state.0.lock()")) {
-            throw @"
-ESTE WORKFLOW ESTA COMPILANDO CODIGO ANTIGUO.
-
-Se encontró la implementación Rust anterior que provoca E0597:
-    if let Ok(mut guard) = state.0.lock()
-
-No continúes con este tag/commit.
-Sube primero la versión corregida y crea UN TAG NUEVO después del commit.
-"@
+            throw "Codigo Rust antiguo detectado. No se construira el instalador con el bug E0597."
           }
 
           if (-not $rust.Contains("terminate_engine(state.inner())")) {
-            throw "No se encontró el fix Rust esperado en src-tauri/src/lib.rs."
+            throw "No se encontro terminate_engine(state.inner()) en lib.rs."
           }
 
-          Write-Host ""
-          Write-Host "Fix Rust correcto detectado." -ForegroundColor Green
+          Write-Host "Fix Rust correcto." -ForegroundColor Green
 
-      - name: Resolver versión y tag de Release
+      - name: Resolver version y tag
         id: meta
         shell: pwsh
         run: |
-          $package = Get-Content "package.json" -Raw | ConvertFrom-Json
+          $package = Get-Content ".\package.json" -Raw | ConvertFrom-Json
           $version = [string]$package.version
           $tag = "v$version"
 
           if ($env:GITHUB_REF_TYPE -eq "tag" -and $env:GITHUB_REF_NAME -ne $tag) {
-            throw "El tag '$env:GITHUB_REF_NAME' no coincide con la versión '$tag' de package.json."
+            throw "El tag '$env:GITHUB_REF_NAME' no coincide con la version '$tag'."
           }
 
           "version=$version" >> $env:GITHUB_OUTPUT
           "tag=$tag" >> $env:GITHUB_OUTPUT
 
-          Write-Host "Versión: $version"
+          Write-Host "Version: $version"
           Write-Host "Release tag: $tag"
 
-
-- name: Comprobar referencia de ejecución
-  shell: pwsh
-  run: |
-    Write-Host "GITHUB_REF      = $env:GITHUB_REF"
-    Write-Host "GITHUB_REF_TYPE = $env:GITHUB_REF_TYPE"
-    Write-Host "GITHUB_REF_NAME = $env:GITHUB_REF_NAME"
-    Write-Host "GITHUB_SHA      = $env:GITHUB_SHA"
-    Write-Host ""
-    git status --short
-    git log -1 --decorate --oneline
+      - name: Mostrar referencia de ejecucion
+        shell: pwsh
+        run: |
+          Write-Host "GITHUB_REF      = $env:GITHUB_REF"
+          Write-Host "GITHUB_REF_TYPE = $env:GITHUB_REF_TYPE"
+          Write-Host "GITHUB_REF_NAME = $env:GITHUB_REF_NAME"
+          Write-Host "GITHUB_SHA      = $env:GITHUB_SHA"
+          git status --short
+          git log -1 --decorate --oneline
 
       - name: Comprobar versiones sincronizadas
         shell: pwsh
@@ -112,24 +96,27 @@ Sube primero la versión corregida y crea UN TAG NUEVO después del commit.
         shell: pwsh
         run: npm install
 
-      - name: Cargo check Tauri antes del empaquetado pesado
+      - name: Cargo check antes del build pesado
         shell: pwsh
         run: cargo check --manifest-path .\src-tauri\Cargo.toml
 
-      - name: Preparar motor Python + PyTorch CUDA
+      - name: Preparar motor Python y PyTorch
         shell: pwsh
         run: powershell -ExecutionPolicy Bypass -File .\scripts\prepare-release-engine.ps1
 
-      - name: Comprobar sidecar del motor
+      - name: Comprobar sidecar
         shell: pwsh
         run: |
           $engine = ".\engine-dist\qwen-engine\qwen-engine.exe"
+
           if (-not (Test-Path $engine)) {
-            throw "No se generó $engine"
+            throw "No se genero $engine"
           }
+
           Get-Item $engine | Format-List FullName, Length
 
       - name: Compilar NSIS y publicar GitHub Release
+        id: tauri
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -139,21 +126,13 @@ Sube primero la versión corregida y crea UN TAG NUEVO después del commit.
           releaseBody: |
             ## Voice Studio AI v${{ steps.meta.outputs.version }}
 
-            ### Windows
-            Descarga el archivo `*-setup.exe`.
+            Descarga el archivo Setup.exe de Windows.
 
-            El instalador incluye:
-            - Voice Studio AI
-            - motor Python empaquetado
-            - PyTorch / runtime CUDA
-            - qwen-tts
-            - dependencias de audio
+            El instalador incluye la aplicacion, el motor Python empaquetado,
+            PyTorch, qwen-tts y las dependencias locales necesarias.
 
-            Los pesos de los modelos se descargan desde la aplicación la primera vez
-            y quedan guardados en la caché local.
-
-            **GPU NVIDIA:** no necesitas instalar CUDA Toolkit. Sí necesitas un driver
-            NVIDIA compatible para usar aceleración por GPU.
+            Los modelos se descargan desde la aplicacion cuando se utilizan
+            por primera vez y quedan guardados en la cache local.
           generateReleaseNotes: true
           releaseDraft: false
           prerelease: false
@@ -162,24 +141,21 @@ Sube primero la versión corregida y crea UN TAG NUEVO después del commit.
           uploadWorkflowArtifacts: true
           workflowArtifactNamePattern: "Voice-Studio-AI_[version]_Windows_[arch]"
 
-      - name: Verificar que la Release realmente existe
+      - name: Verificar que la Release existe
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ steps.meta.outputs.tag }}
         run: |
-          Write-Host "Verificando Release $env:RELEASE_TAG ..."
-          gh release view "$env:RELEASE_TAG" `
-            --repo "${{ github.repository }}" `
-            --json tagName,name,url,assets
+          gh release view "$env:RELEASE_TAG" --repo "${{ github.repository }}" --json tagName,name,url,assets
 
       - name: Resumen
         shell: pwsh
         env:
           RELEASE_TAG: ${{ steps.meta.outputs.tag }}
         run: |
-          "## ✅ Release publicada" >> $env:GITHUB_STEP_SUMMARY
+          "## Release publicada" >> $env:GITHUB_STEP_SUMMARY
           "" >> $env:GITHUB_STEP_SUMMARY
-          "- Tag: ``$env:RELEASE_TAG``" >> $env:GITHUB_STEP_SUMMARY
-          "- Repositorio: ``${{ github.repository }}``" >> $env:GITHUB_STEP_SUMMARY
-          "- El instalador también queda guardado como artifact del workflow." >> $env:GITHUB_STEP_SUMMARY
+          "- Tag: $env:RELEASE_TAG" >> $env:GITHUB_STEP_SUMMARY
+          "- Setup.exe publicado en GitHub Releases" >> $env:GITHUB_STEP_SUMMARY
+          "- Instalador guardado tambien como workflow artifact" >> $env:GITHUB_STEP_SUMMARY
