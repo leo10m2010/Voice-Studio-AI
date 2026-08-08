@@ -618,3 +618,40 @@ Expected entries in GitHub Actions after pushing to the default branch:
 
 The second workflow supports both manual `workflow_dispatch` and automatic
 execution on `v*` tags.
+
+
+---
+
+# V0.6.13 — Lean Windows packaging
+
+The PyInstaller build no longer uses `--collect-all` for Torch, Transformers,
+Librosa, SoundFile or Torchaudio.
+
+A temporary 12Hz-only Qwen runtime is prepared for packaging, unused heavy
+optional modules are excluded, and the frozen engine must pass:
+
+```powershell
+engine-dist\qwen-engine\qwen-engine.exe --self-test-packaging
+```
+
+before Tauri/NSIS runs.
+
+Build locally:
+
+```powershell
+npm run build:windows
+```
+
+The build prints the engine size, the largest bundled files and the final
+`setup.exe` size.
+
+
+---
+
+# v0.7.0 — Engine Manager
+
+Voice Studio AI now ships as a lightweight Windows application. Python,
+PyTorch and qwen-tts are installed as a private downloadable runtime during
+the visual first-run setup.
+
+See `ENGINE_MANAGER.md`.

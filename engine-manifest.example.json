@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "version": "1.0.0",
+  "published_at": "GENERATED_AT_RELEASE_TIME",
+  "engines": [
+    {
+      "flavor": "cpu",
+      "label": "Motor CPU",
+      "version": "1.0.0",
+      "download_bytes": 0,
+      "installed_bytes": 0,
+      "description": "Máxima compatibilidad; funciona sin una GPU NVIDIA.",
+      "parts": []
+    },
+    {
+      "flavor": "nvidia",
+      "label": "Motor NVIDIA",
+      "version": "1.0.0",
+      "download_bytes": 0,
+      "installed_bytes": 0,
+      "description": "Aceleración CUDA para equipos con GPU NVIDIA compatible.",
+      "parts": []
+    }
+  ]
+}

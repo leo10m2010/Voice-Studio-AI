@@ -23,7 +23,11 @@ const icons = {
   music: `<svg viewBox="0 0 24 24"><path d="M9 18V6l10-2v12M9 18a3 3 0 1 1-3-3h3M19 16a3 3 0 1 1-3-3h3"/></svg>`,
   volume: `<svg viewBox="0 0 24 24"><path d="M5 10v4h4l5 4V6L9 10H5Z"/><path d="M17 9a4 4 0 0 1 0 6"/></svg>`,
   model: `<svg viewBox="0 0 24 24"><path d="M12 3 4 7v10l8 4 8-4V7l-8-4Z"/><path d="m4 7 8 4 8-4M12 11v10"/></svg>`,
-  external: `<svg viewBox="0 0 24 24"><path d="M14 5h5v5M19 5l-8 8"/><path d="M18 13v6H5V6h6"/></svg>`
+  external: `<svg viewBox="0 0 24 24"><path d="M14 5h5v5M19 5l-8 8"/><path d="M18 13v6H5V6h6"/></svg>`,
+  package: `<svg viewBox="0 0 24 24"><path d="m12 3 8 4.5v9L12 21l-8-4.5v-9L12 3Z"/><path d="m4 7.5 8 4.5 8-4.5M12 12v9"/></svg>`,
+  shield: `<svg viewBox="0 0 24 24"><path d="M12 3 5 6v5c0 4.6 2.8 8 7 10 4.2-2 7-5.4 7-10V6l-7-3Z"/><path d="m9 12 2 2 4-5"/></svg>`,
+  wifi: `<svg viewBox="0 0 24 24"><path d="M5 9a11 11 0 0 1 14 0M8 12a7 7 0 0 1 8 0M11 15a2.5 2.5 0 0 1 2 0"/><circle cx="12" cy="18" r=".8" fill="currentColor" stroke="none"/></svg>`,
+  refresh: `<svg viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M18.5 9A7 7 0 0 0 6 7M5.5 15A7 7 0 0 0 18 17"/></svg>`
 };
 
 const state = {
@@ -44,7 +48,16 @@ const state = {
   seeking: false,
   modelSearchTimer: null,
   activeSheet: null,
-  selectedSoundId: ""
+  selectedSoundId: "",
+  engine: {
+    status: null,
+    catalog: null,
+    hardware: null,
+    selectedFlavor: "cpu",
+    installing: false,
+    bridgeReady: false,
+    bootStarted: false
+  }
 };
 
 document.querySelector("#app").innerHTML = `
@@ -182,6 +195,16 @@ document.querySelector("#app").innerHTML = `
                 </span>
                 <span class="chevron">${icons.chevron}</span>
               </button>
+            </div>
+
+            <div class="engine-mini-card" id="engineMiniCard">
+              <span class="engine-mini-icon">${icons.package}</span>
+              <span class="engine-mini-copy">
+                <small>MOTOR LOCAL</small>
+                <strong id="engineMiniTitle">Comprobando…</strong>
+                <span id="engineMiniMeta">Python y PyTorch privados de Voice Studio AI</span>
+              </span>
+              <button class="engine-mini-action pressable" id="manageEngine" type="button">Gestionar</button>
             </div>
 
             <div class="setting-block">
@@ -371,6 +394,125 @@ document.querySelector("#app").innerHTML = `
       </form>
     </dialog>
 
+
+    <section class="engine-setup" id="engineSetup" aria-hidden="true">
+      <div class="engine-setup-backdrop"></div>
+      <div class="engine-setup-card" role="dialog" aria-modal="true" aria-labelledby="engineSetupTitle">
+        <div class="setup-brand">
+          <span class="setup-logo">${icons.wave}</span>
+          <div>
+            <strong>Voice Studio AI</strong>
+            <small>Configuración del motor local</small>
+          </div>
+          <button class="setup-close pressable" id="engineSetupClose" type="button" aria-label="Cerrar" hidden>×</button>
+        </div>
+
+        <div class="setup-view active" id="engineIntroView">
+          <div class="setup-hero">
+            <span class="setup-kicker">PRIMER INICIO</span>
+            <h1 id="engineSetupTitle">Preparamos el estudio por ti.</h1>
+            <p>Voice Studio AI descargará su motor de voz de forma segura. No necesitas instalar Python, PyTorch ni abrir una terminal.</p>
+          </div>
+
+          <div class="setup-hardware-card">
+            <span class="setup-hardware-icon">${icons.cpu}</span>
+            <div>
+              <small>TU EQUIPO</small>
+              <strong id="setupHardwareName">Detectando hardware…</strong>
+              <span id="setupHardwareMeta">Buscando la mejor configuración.</span>
+            </div>
+            <span class="setup-recommended" id="setupRecommended">AUTO</span>
+          </div>
+
+          <div class="engine-flavors" id="engineFlavorList">
+            <div class="setup-skeleton"></div>
+            <div class="setup-skeleton"></div>
+          </div>
+
+          <div class="setup-trust-row">
+            <span>${icons.shield}</span>
+            <p><strong>Instalación privada.</strong> El runtime de Python queda dentro de Voice Studio AI y no modifica Python ni CUDA del sistema.</p>
+          </div>
+
+          <div class="setup-actions">
+            <div class="setup-size">
+              <small>DESCARGA</small>
+              <strong id="setupDownloadSize">Calculando…</strong>
+            </div>
+            <button class="setup-primary pressable" id="installEngineButton" type="button" disabled>
+              Preparar Voice Studio AI
+            </button>
+          </div>
+
+          <p class="setup-error" id="engineCatalogError" hidden></p>
+        </div>
+
+        <div class="setup-view" id="engineProgressView">
+          <div class="setup-progress-hero">
+            <span class="setup-orb"><i></i><b></b></span>
+            <span class="setup-kicker" id="setupProgressKicker">PREPARANDO MOTOR</span>
+            <h1 id="setupProgressTitle">Descargando componentes…</h1>
+            <p id="setupProgressMessage">Esto puede tardar unos minutos. Puedes seguir el progreso aquí.</p>
+          </div>
+
+          <div class="setup-progress-track">
+            <span id="setupProgressBar"></span>
+          </div>
+
+          <div class="setup-progress-meta">
+            <strong id="setupProgressPercent">0%</strong>
+            <span id="setupProgressBytes">0 MB</span>
+          </div>
+
+          <div class="setup-steps" id="setupSteps">
+            <div data-step="downloading"><i>${icons.download}</i><span>Descargar</span><b>En espera</b></div>
+            <div data-step="verifying"><i>${icons.shield}</i><span>Verificar</span><b>En espera</b></div>
+            <div data-step="installing"><i>${icons.package}</i><span>Instalar</span><b>En espera</b></div>
+            <div data-step="testing"><i>${icons.check}</i><span>Comprobar</span><b>En espera</b></div>
+          </div>
+
+          <button class="setup-cancel pressable" id="cancelEngineInstall" type="button">Cancelar descarga</button>
+        </div>
+
+        <div class="setup-view" id="engineDoneView">
+          <div class="setup-complete">
+            <span class="setup-complete-icon">${icons.check}</span>
+            <span class="setup-kicker">TODO LISTO</span>
+            <h1>Tu estudio está preparado.</h1>
+            <p id="setupDoneMeta">El motor local fue instalado y comprobado correctamente.</p>
+            <button class="setup-primary pressable" id="enterStudioButton" type="button">Entrar a Voice Studio AI</button>
+          </div>
+        </div>
+
+        <div class="setup-view" id="engineManageView">
+          <div class="setup-hero manage">
+            <span class="setup-kicker">MOTOR LOCAL</span>
+            <h1>Componentes de Voice Studio AI</h1>
+            <p>Administra el motor sin tocar Python, controladores ni archivos del sistema.</p>
+          </div>
+
+          <div class="engine-installed-card">
+            <span class="setup-complete-icon small">${icons.check}</span>
+            <div>
+              <small>INSTALADO</small>
+              <strong id="manageEngineTitle">Motor local</strong>
+              <span id="manageEngineMeta">Comprobando versión…</span>
+            </div>
+          </div>
+
+          <div class="manage-actions">
+            <button class="secondary-button pressable" id="repairEngineButton" type="button">${icons.refresh}<span>Reparar / actualizar</span></button>
+            <button class="danger-outline pressable" id="uninstallEngineButton" type="button">${icons.trash}<span>Desinstalar motor</span></button>
+          </div>
+
+          <div class="setup-trust-row compact">
+            <span>${icons.info}</span>
+            <p>Tus voces, música, historial y modelos descargados se guardan aparte. Reparar o desinstalar el motor no borra esos datos.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <input id="voiceFile" type="file" accept=".wav,.mp3,.flac,.ogg" hidden>
     <input id="soundFile" type="file" accept=".wav,.mp3,.flac,.ogg" hidden>
     <div class="tooltip" id="tooltip"></div>
@@ -402,7 +544,17 @@ const el = {
   compatibleModelList: $("#compatibleModelList"), modelSearch: $("#modelSearch"), modelSearchState: $("#modelSearchState"), modelSearchResults: $("#modelSearchResults"),
   transcriptDialog: $("#transcriptDialog"), transcriptForm: $("#transcriptForm"), transcriptInput: $("#transcriptInput"), saveTranscript: $("#saveTranscript"), removeTranscript: $("#removeTranscript"),
   voiceImportDialog: $("#voiceImportDialog"), voiceImportForm: $("#voiceImportForm"), importSummary: $("#importSummary"), importTranscript: $("#importTranscript"), confirmVoiceImport: $("#confirmVoiceImport"),
-  tooltip: $("#tooltip"), toast: $("#toast")
+  tooltip: $("#tooltip"), toast: $("#toast"),
+  engineMiniCard: $("#engineMiniCard"), engineMiniTitle: $("#engineMiniTitle"), engineMiniMeta: $("#engineMiniMeta"), manageEngine: $("#manageEngine"),
+  engineSetup: $("#engineSetup"), engineSetupClose: $("#engineSetupClose"),
+  engineIntroView: $("#engineIntroView"), engineProgressView: $("#engineProgressView"), engineDoneView: $("#engineDoneView"), engineManageView: $("#engineManageView"),
+  setupHardwareName: $("#setupHardwareName"), setupHardwareMeta: $("#setupHardwareMeta"), setupRecommended: $("#setupRecommended"),
+  engineFlavorList: $("#engineFlavorList"), setupDownloadSize: $("#setupDownloadSize"), installEngineButton: $("#installEngineButton"),
+  engineCatalogError: $("#engineCatalogError"), setupProgressKicker: $("#setupProgressKicker"), setupProgressTitle: $("#setupProgressTitle"),
+  setupProgressMessage: $("#setupProgressMessage"), setupProgressBar: $("#setupProgressBar"), setupProgressPercent: $("#setupProgressPercent"),
+  setupProgressBytes: $("#setupProgressBytes"), setupSteps: $("#setupSteps"), cancelEngineInstall: $("#cancelEngineInstall"),
+  setupDoneMeta: $("#setupDoneMeta"), enterStudioButton: $("#enterStudioButton"), manageEngineTitle: $("#manageEngineTitle"),
+  manageEngineMeta: $("#manageEngineMeta"), repairEngineButton: $("#repairEngineButton"), uninstallEngineButton: $("#uninstallEngineButton")
 };
 
 function esc(v){return String(v??"").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;").replaceAll("'","&#039;")}
@@ -832,10 +984,255 @@ async function importSound(file){
 }
 function toggle(btn){btn.classList.toggle("on");btn.setAttribute("aria-pressed",String(btn.classList.contains("on")))}
 
+
+function isDesktop(){return Boolean(window.__TAURI_INTERNALS__)}
+let tauriInvokeFn=null;
+let tauriListenFn=null;
+let engineUnlisten=null;
+
+async function tauriInvoke(command,args={}){
+  if(!isDesktop())return null;
+  if(!tauriInvokeFn){
+    const core=await import("@tauri-apps/api/core");
+    tauriInvokeFn=core.invoke;
+  }
+  return tauriInvokeFn(command,args);
+}
+function humanBytes(bytes){
+  const n=Number(bytes||0);
+  if(!Number.isFinite(n)||n<=0)return "—";
+  const units=["B","KB","MB","GB","TB"];
+  let value=n,index=0;
+  while(value>=1024&&index<units.length-1){value/=1024;index++}
+  return `${value>=100||index===0?value.toFixed(0):value>=10?value.toFixed(1):value.toFixed(2)} ${units[index]}`;
+}
+function engineViews(active){
+  [el.engineIntroView,el.engineProgressView,el.engineDoneView,el.engineManageView].forEach(view=>view.classList.toggle("active",view.id===active));
+}
+function openEngineSetup(view="engineIntroView",closable=false){
+  engineViews(view);
+  el.engineSetup.classList.add("open");
+  el.engineSetup.setAttribute("aria-hidden","false");
+  el.engineSetupClose.hidden=!closable;
+  document.documentElement.classList.add("engine-modal-open");
+}
+function closeEngineSetup(){
+  if(state.engine.installing)return;
+  el.engineSetup.classList.remove("open");
+  el.engineSetup.setAttribute("aria-hidden","true");
+  document.documentElement.classList.remove("engine-modal-open");
+}
+function updateEngineMini(){
+  const s=state.engine.status;
+  if(!s){
+    el.engineMiniTitle.textContent="Comprobando…";
+    el.engineMiniMeta.textContent="Python y PyTorch privados de Voice Studio AI";
+    return;
+  }
+  if(s.installed){
+    const flavor=s.flavor==="nvidia"?"NVIDIA":s.flavor==="cpu"?"CPU":s.flavor||"Local";
+    el.engineMiniTitle.textContent=`Motor ${flavor} · ${s.version||"instalado"}`;
+    el.engineMiniMeta.textContent=`${humanBytes(s.installed_bytes)} · ${s.running?"Activo":"Listo"}`;
+  }else{
+    el.engineMiniTitle.textContent="Motor no instalado";
+    el.engineMiniMeta.textContent="Se prepara visualmente al primer inicio";
+  }
+}
+function updateHardwareSetup(hardware,recommended){
+  state.engine.hardware=hardware;
+  if(hardware?.nvidia_available){
+    el.setupHardwareName.textContent=hardware.gpu_name||"NVIDIA detectada";
+    const bits=[];
+    if(hardware.vram_gb)bits.push(`${Number(hardware.vram_gb).toFixed(1)} GB VRAM`);
+    if(hardware.driver_version)bits.push(`Driver ${hardware.driver_version}`);
+    el.setupHardwareMeta.textContent=bits.join(" · ")||"Aceleración NVIDIA disponible";
+  }else{
+    el.setupHardwareName.textContent="Procesamiento por CPU";
+    el.setupHardwareMeta.textContent="No se detectó una GPU NVIDIA compatible.";
+  }
+  el.setupRecommended.textContent=(recommended||"cpu").toUpperCase()+" · RECOMENDADO";
+}
+function enginePackageFor(flavor){
+  return state.engine.catalog?.manifest?.engines?.find(item=>item.flavor===flavor)||null;
+}
+function selectEngineFlavor(flavor){
+  if(state.engine.installing)return;
+  if(!enginePackageFor(flavor))return;
+  state.engine.selectedFlavor=flavor;
+  el.engineFlavorList.querySelectorAll("[data-engine-flavor]").forEach(card=>{
+    card.classList.toggle("selected",card.dataset.engineFlavor===flavor);
+    card.setAttribute("aria-checked",String(card.dataset.engineFlavor===flavor));
+  });
+  const pack=enginePackageFor(flavor);
+  el.setupDownloadSize.textContent=pack?.download_bytes?humanBytes(pack.download_bytes):"Según el paquete";
+  el.installEngineButton.disabled=!pack;
+}
+function renderEngineFlavors(){
+  const engines=state.engine.catalog?.manifest?.engines||[];
+  if(!engines.length){
+    el.engineFlavorList.innerHTML=`<p class="engine-empty">No hay motores publicados todavía.</p>`;
+    el.installEngineButton.disabled=true;
+    return;
+  }
+  const recommended=state.engine.catalog.recommended_flavor;
+  el.engineFlavorList.innerHTML=engines.map(pack=>{
+    const gpu=pack.flavor==="nvidia";
+    const rec=pack.flavor===recommended;
+    return `<button type="button" class="engine-flavor-card pressable ${rec?"recommended":""}" data-engine-flavor="${esc(pack.flavor)}" role="radio" aria-checked="false">
+      <span class="engine-flavor-icon">${gpu?icons.spark:icons.cpu}</span>
+      <span class="engine-flavor-copy">
+        <span><strong>${esc(pack.label|| (gpu?"Motor NVIDIA":"Motor CPU"))}</strong>${rec?`<em>RECOMENDADO</em>`:""}</span>
+        <small>${esc(pack.description|| (gpu?"Aceleración CUDA para equipos NVIDIA.":"Compatibilidad amplia sin depender de NVIDIA."))}</small>
+        <b>${pack.download_bytes?`${humanBytes(pack.download_bytes)} de descarga`:"Tamaño según publicación"}${pack.installed_bytes?` · ${humanBytes(pack.installed_bytes)} instalado`:""}</b>
+      </span>
+      <span class="engine-radio"><i></i></span>
+    </button>`;
+  }).join("");
+  el.engineFlavorList.querySelectorAll("[data-engine-flavor]").forEach(card=>card.onclick=()=>selectEngineFlavor(card.dataset.engineFlavor));
+  selectEngineFlavor(recommended&&enginePackageFor(recommended)?recommended:engines[0].flavor);
+}
+async function loadEngineCatalog({showErrors=true}={}){
+  el.engineCatalogError.hidden=true;
+  el.installEngineButton.disabled=true;
+  try{
+    const catalog=await tauriInvoke("engine_catalog");
+    state.engine.catalog=catalog;
+    state.engine.status=catalog.status;
+    updateEngineMini();
+    updateHardwareSetup(catalog.hardware,catalog.recommended_flavor);
+    renderEngineFlavors();
+    return catalog;
+  }catch(error){
+    if(showErrors){
+      el.engineCatalogError.hidden=false;
+      el.engineCatalogError.innerHTML=`No pudimos consultar los componentes del motor. <button type="button" id="retryEngineCatalog">Reintentar</button><small>${esc(String(error))}</small>`;
+      $("#retryEngineCatalog")?.addEventListener("click",()=>loadEngineCatalog());
+    }
+    throw error;
+  }
+}
+function updateInstallSteps(stage){
+  const order=["downloading","verifying","installing","testing"];
+  const normalized=stage==="preparing"?"downloading":stage==="done"?"testing":stage;
+  const current=Math.max(0,order.indexOf(normalized));
+  [...el.setupSteps.children].forEach((row,index)=>{
+    const completed=stage==="done"||index<current;
+    const active=stage!=="done"&&index===current;
+    row.classList.toggle("complete",completed);
+    row.classList.toggle("active",active);
+    row.querySelector("b").textContent=completed?"Listo":active?"En curso":"En espera";
+  });
+}
+function handleEngineProgress(progress){
+  if(!progress)return;
+  const pct=Math.max(0,Math.min(100,Number(progress.percent||0)));
+  el.setupProgressBar.style.width=`${pct}%`;
+  el.setupProgressPercent.textContent=`${Math.round(pct)}%`;
+  el.setupProgressBytes.textContent=progress.total_bytes?`${humanBytes(progress.downloaded_bytes)} / ${humanBytes(progress.total_bytes)}`:"Preparando…";
+  el.setupProgressMessage.textContent=progress.message||"Preparando componentes…";
+  updateInstallSteps(progress.stage);
+
+  const titles={
+    preparing:["PREPARANDO MOTOR","Preparando descarga…"],
+    downloading:["DESCARGANDO MOTOR","Descargando componentes…"],
+    verifying:["VERIFICACIÓN SEGURA","Comprobando archivos…"],
+    installing:["INSTALANDO","Preparando el runtime local…"],
+    testing:["COMPROBACIÓN FINAL","Probando el motor…"],
+    done:["TODO LISTO","Motor preparado."]
+  };
+  const t=titles[progress.stage]||titles.downloading;
+  el.setupProgressKicker.textContent=t[0];
+  el.setupProgressTitle.textContent=t[1];
+}
+async function initEngineBridge(){
+  if(!isDesktop()||state.engine.bridgeReady)return;
+  const event=await import("@tauri-apps/api/event");
+  tauriListenFn=event.listen;
+  engineUnlisten=await tauriListenFn("engine-install-progress",evt=>handleEngineProgress(evt.payload));
+  state.engine.bridgeReady=true;
+}
+async function installSelectedEngine(){
+  const flavor=state.engine.selectedFlavor;
+  const pack=enginePackageFor(flavor);
+  if(!pack||state.engine.installing)return;
+  state.engine.installing=true;
+  openEngineSetup("engineProgressView",false);
+  el.cancelEngineInstall.disabled=false;
+  handleEngineProgress({stage:"preparing",percent:0,downloaded_bytes:0,total_bytes:pack.download_bytes||0,message:"Preparando una descarga segura…"});
+  try{
+    const status=await tauriInvoke("install_engine",{flavor});
+    state.engine.status=status;
+    updateEngineMini();
+    handleEngineProgress({stage:"done",percent:100,downloaded_bytes:pack.download_bytes||0,total_bytes:pack.download_bytes||0,message:"Motor instalado y verificado."});
+    el.setupDoneMeta.textContent=`${pack.label} ${pack.version} · ${humanBytes(status.installed_bytes)} instalados.`;
+    engineViews("engineDoneView");
+  }catch(error){
+    const message=String(error);
+    state.engine.installing=false;
+    el.cancelEngineInstall.disabled=true;
+    engineViews("engineIntroView");
+    el.engineCatalogError.hidden=false;
+    el.engineCatalogError.innerHTML=`No se pudo completar la instalación.<small>${esc(message)}</small>`;
+    toast(message,"error");
+    return;
+  }
+  state.engine.installing=false;
+  el.cancelEngineInstall.disabled=true;
+}
+async function refreshEngineStatus(){
+  if(!isDesktop())return null;
+  try{
+    const status=await tauriInvoke("engine_status");
+    state.engine.status=status;
+    updateEngineMini();
+    return status;
+  }catch(error){
+    console.error(error);
+    return null;
+  }
+}
+async function showFirstRunEngine(){
+  openEngineSetup("engineIntroView",false);
+  try{await loadEngineCatalog()}catch{}
+}
+async function showEngineManager(){
+  const status=await refreshEngineStatus();
+  if(status?.installed){
+    el.manageEngineTitle.textContent=`${status.label||"Motor local"} · ${status.version||""}`;
+    el.manageEngineMeta.textContent=`${humanBytes(status.installed_bytes)} · ${status.running?"Activo":"Listo para iniciar"}`;
+    openEngineSetup("engineManageView",true);
+    loadEngineCatalog({showErrors:false}).catch(()=>{});
+  }else{
+    openEngineSetup("engineIntroView",true);
+    loadEngineCatalog().catch(()=>{});
+  }
+}
+async function repairEngine(){
+  if(state.engine.installing)return;
+  try{
+    await loadEngineCatalog();
+    const current=state.engine.status?.flavor;
+    if(current&&enginePackageFor(current))selectEngineFlavor(current);
+    installSelectedEngine();
+  }catch{}
+}
+async function removeEngine(){
+  if(state.engine.installing)return;
+  if(!confirm("¿Desinstalar el motor local? Tus voces, música, historial y modelos se conservarán."))return;
+  try{
+    await tauriInvoke("uninstall_engine");
+    state.engine.status=await tauriInvoke("engine_status");
+    updateEngineMini();
+    closeEngineSetup();
+    toast("Motor local desinstalado. Tus datos se conservaron.","success");
+    setTimeout(()=>showFirstRunEngine(),250);
+  }catch(error){toast(String(error),"error")}
+}
+
 function initTheme(){
   const t=localStorage.getItem("vsa-theme")||(matchMedia("(prefers-color-scheme:dark)").matches?"dark":"light");document.documentElement.dataset.theme=t;el.theme.innerHTML=t==="dark"?icons.sun:icons.moon
 }
-async function startTauriEngine(){if(!window.__TAURI_INTERNALS__)return;try{const{invoke}=await import("@tauri-apps/api/core");await invoke("start_engine")}catch(e){console.error(e)}}
+async function startTauriEngine(){if(!isDesktop())return;await tauriInvoke("start_engine")}
 async function waitEngine(){for(let i=0;i<60;i++){try{await api("/api/health");return true}catch{await new Promise(r=>setTimeout(r,600))}}return false}
 
 el.script.oninput=()=>{el.count.textContent=`${el.script.value.length} / 3000`;estimateDuration();updateGenerate()};
@@ -946,6 +1343,22 @@ el.musicVolume.oninput=()=>{
   savePreferences();
 };
 el.speakerBoost.onclick=()=>{toggle(el.speakerBoost);savePreferences()};el.reset.onclick=()=>{state.profile="natural";applyProfile("natural",false);el.mode.value="auto";el.output.value="wav";savePreferences();toast("Valores restablecidos.")};
+
+el.installEngineButton.onclick=installSelectedEngine;
+el.cancelEngineInstall.onclick=async()=>{
+  el.cancelEngineInstall.disabled=true;
+  el.setupProgressMessage.textContent="Cancelando de forma segura…";
+  try{await tauriInvoke("cancel_engine_install")}catch{}
+};
+el.enterStudioButton.onclick=async()=>{
+  closeEngineSetup();
+  await launchWorkspace();
+};
+el.manageEngine.onclick=showEngineManager;
+el.engineSetupClose.onclick=closeEngineSetup;
+el.repairEngineButton.onclick=repairEngine;
+el.uninstallEngineButton.onclick=removeEngine;
+
 $$(".quick-prompts button").forEach(b=>b.onclick=()=>{el.script.value=b.dataset.prompt;el.script.dispatchEvent(new Event("input"))});
 $$(".help").forEach(b=>{b.onmouseenter=()=>{el.tooltip.textContent=b.dataset.tip;const r=b.getBoundingClientRect();el.tooltip.style.left=`${Math.min(innerWidth-300,Math.max(10,r.left-240))}px`;el.tooltip.style.top=`${r.bottom+7}px`;el.tooltip.classList.add("show")};b.onmouseleave=()=>el.tooltip.classList.remove("show")});
 el.theme.onclick=()=>{const t=document.documentElement.dataset.theme==="dark"?"light":"dark";document.documentElement.dataset.theme=t;localStorage.setItem("vsa-theme",t);el.theme.innerHTML=t==="dark"?icons.sun:icons.moon;drawWaveform()};
@@ -965,13 +1378,42 @@ document.addEventListener("pointerup",()=>$$(".is-pressed").forEach(x=>x.classLi
 document.addEventListener("pointercancel",()=>$$(".is-pressed").forEach(x=>x.classList.remove("is-pressed")),{passive:true});
 document.addEventListener("click",e=>{if(!e.target.closest(".volume-wrap"))el.volumePopover.classList.remove("open")});
 
+async function launchWorkspace(){
+  if(state.engine.bootStarted)return;
+  state.engine.bootStarted=true;
+  try{
+    await startTauriEngine();
+    if(!(await waitEngine()))throw new Error("El motor local no pudo iniciarse.");
+    await refreshEngineStatus();
+    await refreshData();
+    syncLabels();
+  }catch(error){
+    state.engine.bootStarted=false;
+    const message=String(error);
+    if(message.includes("ENGINE_NOT_INSTALLED")){
+      await showFirstRunEngine();
+      return;
+    }
+    toast(message,"error");
+  }
+}
 async function boot(){
   initTheme();
   wirePlayer();
   closeAllSheets();
   switchTab("settings");
-  await startTauriEngine();
-  if(!(await waitEngine()))return toast("El motor local no pudo iniciarse.","error");
-  try{await refreshData();syncLabels()}catch(e){toast(e.message,"error")}
+
+  if(!isDesktop()){
+    await launchWorkspace();
+    return;
+  }
+
+  await initEngineBridge();
+  const status=await refreshEngineStatus();
+  if(!status?.installed){
+    await showFirstRunEngine();
+    return;
+  }
+  await launchWorkspace();
 }
 boot();

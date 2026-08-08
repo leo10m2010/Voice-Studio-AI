@@ -1,6 +1,6 @@
 {
   "name": "voice-studio-ai",
-  "version": "0.6.12",
+  "version": "0.7.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -11,7 +11,10 @@
     "tauri": "tauri",
     "build:windows": "powershell -ExecutionPolicy Bypass -File .\\scripts\\build-app-windows.ps1",
     "release:check": "powershell -ExecutionPolicy Bypass -File .\\scripts\\check-release-version.ps1",
-    "release:pretag": "powershell -ExecutionPolicy Bypass -File .\\scripts\\check-before-tag.ps1"
+    "release:pretag": "powershell -ExecutionPolicy Bypass -File .\\scripts\\check-before-tag.ps1",
+    "build:engine": "powershell -ExecutionPolicy Bypass -File .\\scripts\\build-engine-windows.ps1",
+    "package:engine": "powershell -ExecutionPolicy Bypass -File .\\scripts\\package-engine-assets.ps1",
+    "build:engine-release": "powershell -ExecutionPolicy Bypass -File .\\scripts\\build-engine-release.ps1"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.8.0"

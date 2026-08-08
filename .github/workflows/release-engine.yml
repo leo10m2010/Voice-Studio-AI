@@ -1,0 +1,127 @@
+name: "03 - Publicar motores CPU y NVIDIA"
+
+on:
+  workflow_dispatch:
+    inputs:
+      engine_version:
+        description: "Version del motor"
+        required: true
+        default: "1.0.0"
+      flavor:
+        description: "Motor a construir"
+        required: true
+        type: choice
+        default: both
+        options:
+          - both
+          - cpu
+          - nvidia
+
+permissions:
+  contents: write
+
+jobs:
+  prepare-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Preparar Release del motor
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.engine_version }}
+        run: |
+          TAG="engine-v$VERSION"
+          if ! gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "${{ github.repository }}" --title "Voice Engine v$VERSION" --notes "Runtime descargable de Voice Studio AI. No contiene modelos de voz."
+          fi
+
+  build-cpu:
+    needs: prepare-release
+    if: ${{ inputs.flavor == 'both' || inputs.flavor == 'cpu' }}
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Construir motor CPU
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File .\scripts\build-engine-release.ps1 -Flavor cpu -EngineVersion "${{ inputs.engine_version }}"
+      - name: Subir partes CPU
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: engine-v${{ inputs.engine_version }}
+        run: |
+          Get-ChildItem .\engine-release\voice-engine-cpu-*.zip | ForEach-Object {
+            gh release upload "$env:TAG" $_.FullName --repo "${{ github.repository }}" --clobber
+          }
+      - uses: actions/upload-artifact@v6
+        with:
+          name: engine-fragment-cpu
+          path: engine-release/engine-cpu.json
+
+  build-nvidia:
+    needs: prepare-release
+    if: ${{ inputs.flavor == 'both' || inputs.flavor == 'nvidia' }}
+    runs-on: windows-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Construir motor NVIDIA
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File .\scripts\build-engine-release.ps1 -Flavor nvidia -EngineVersion "${{ inputs.engine_version }}"
+      - name: Subir partes NVIDIA
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: engine-v${{ inputs.engine_version }}
+        run: |
+          Get-ChildItem .\engine-release\voice-engine-nvidia-*.zip | ForEach-Object {
+            gh release upload "$env:TAG" $_.FullName --repo "${{ github.repository }}" --clobber
+          }
+      - uses: actions/upload-artifact@v6
+        with:
+          name: engine-fragment-nvidia
+          path: engine-release/engine-nvidia.json
+
+  publish-manifest:
+    needs: [prepare-release, build-cpu, build-nvidia]
+    if: always() && needs.prepare-release.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v6
+        with:
+          pattern: engine-fragment-*
+          path: fragments
+          merge-multiple: true
+      - name: Crear manifest final
+        env:
+          VERSION: ${{ inputs.engine_version }}
+        run: |
+          python - <<'PY'
+          import json, glob, os
+          from datetime import datetime, timezone
+          engines=[]
+          for path in glob.glob("fragments/engine-*.json"):
+              with open(path, encoding="utf-8") as f:
+                  engines.append(json.load(f))
+          if not engines:
+              raise SystemExit("No se generó ningún motor.")
+          manifest={
+              "schema":1,
+              "version":os.environ["VERSION"],
+              "published_at":datetime.now(timezone.utc).isoformat(),
+              "engines":sorted(engines,key=lambda x:x["flavor"])
+          }
+          with open("engine-manifest.json","w",encoding="utf-8") as f:
+              json.dump(manifest,f,ensure_ascii=False,indent=2)
+          PY
+      - name: Publicar manifest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: engine-v${{ inputs.engine_version }}
+        run: gh release upload "$TAG" engine-manifest.json --repo "${{ github.repository }}" --clobber

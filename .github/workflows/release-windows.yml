@@ -1,4 +1,4 @@
-name: "02 - Crear instalador Windows y publicar Release"
+name: "02 - Crear instalador ligero Windows y publicar Release"
 
 on:
   push:
@@ -9,15 +9,11 @@ on:
 permissions:
   contents: write
 
-concurrency:
-  group: windows-release-${{ github.ref }}
-  cancel-in-progress: false
-
 jobs:
   windows-release:
-    name: "Compilar Setup.exe y publicar Release"
+    name: "Compilar Setup.exe ligero"
     runs-on: windows-latest
-    timeout-minutes: 180
+    timeout-minutes: 60
 
     steps:
       - name: Checkout
@@ -31,92 +27,35 @@ jobs:
           node-version: "24"
           package-manager-cache: false
 
-      - name: Setup Python 3.12
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-          cache: "pip"
-          cache-dependency-path: engine/requirements.txt
-
       - name: Setup Rust stable
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Verificar commit y fix Rust
+      - name: Instalar dependencias
         shell: pwsh
-        run: |
-          Write-Host "Commit que se compilara:"
-          git rev-parse HEAD
-          git log -1 --decorate --oneline
+        run: npm install
 
-          $rust = Get-Content ".\src-tauri\src\lib.rs" -Raw
+      - name: Comprobar versiones
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File .\scripts\check-release-version.ps1
 
-          if ($rust.Contains("if let Ok(mut guard) = state.0.lock()")) {
-            throw "Codigo Rust antiguo detectado. No se construira el instalador con el bug E0597."
-          }
+      - name: Cargo check
+        shell: pwsh
+        run: cargo check --manifest-path .\src-tauri\Cargo.toml
 
-          if (-not $rust.Contains("terminate_engine(state.inner())")) {
-            throw "No se encontro terminate_engine(state.inner()) en lib.rs."
-          }
-
-          Write-Host "Fix Rust correcto." -ForegroundColor Green
-
-      - name: Resolver version y tag
+      - name: Resolver version
         id: meta
         shell: pwsh
         run: |
           $package = Get-Content ".\package.json" -Raw | ConvertFrom-Json
           $version = [string]$package.version
           $tag = "v$version"
-
           if ($env:GITHUB_REF_TYPE -eq "tag" -and $env:GITHUB_REF_NAME -ne $tag) {
-            throw "El tag '$env:GITHUB_REF_NAME' no coincide con la version '$tag'."
+            throw "El tag '$env:GITHUB_REF_NAME' no coincide con '$tag'."
           }
-
           "version=$version" >> $env:GITHUB_OUTPUT
           "tag=$tag" >> $env:GITHUB_OUTPUT
 
-          Write-Host "Version: $version"
-          Write-Host "Release tag: $tag"
-
-      - name: Mostrar referencia de ejecucion
-        shell: pwsh
-        run: |
-          Write-Host "GITHUB_REF      = $env:GITHUB_REF"
-          Write-Host "GITHUB_REF_TYPE = $env:GITHUB_REF_TYPE"
-          Write-Host "GITHUB_REF_NAME = $env:GITHUB_REF_NAME"
-          Write-Host "GITHUB_SHA      = $env:GITHUB_SHA"
-          git status --short
-          git log -1 --decorate --oneline
-
-      - name: Comprobar versiones sincronizadas
-        shell: pwsh
-        run: powershell -ExecutionPolicy Bypass -File .\scripts\check-release-version.ps1
-
-      - name: Instalar dependencias frontend
-        shell: pwsh
-        run: npm install
-
-      - name: Cargo check antes del build pesado
-        shell: pwsh
-        run: cargo check --manifest-path .\src-tauri\Cargo.toml
-
-      - name: Preparar motor Python y PyTorch
-        shell: pwsh
-        run: powershell -ExecutionPolicy Bypass -File .\scripts\prepare-release-engine.ps1
-
-      - name: Comprobar sidecar
-        shell: pwsh
-        run: |
-          $engine = ".\engine-dist\qwen-engine\qwen-engine.exe"
-
-          if (-not (Test-Path $engine)) {
-            throw "No se genero $engine"
-          }
-
-          Get-Item $engine | Format-List FullName, Length
-
-      - name: Compilar NSIS y publicar GitHub Release
-        id: tauri
+      - name: Compilar NSIS y publicar Release
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -126,36 +65,22 @@ jobs:
           releaseBody: |
             ## Voice Studio AI v${{ steps.meta.outputs.version }}
 
-            Descarga el archivo Setup.exe de Windows.
+            Instalador ligero de Windows.
 
-            El instalador incluye la aplicacion, el motor Python empaquetado,
-            PyTorch, qwen-tts y las dependencias locales necesarias.
+            En el primer inicio, Voice Studio AI detecta el hardware y prepara
+            visualmente el motor local CPU/NVIDIA. Python, PyTorch y Qwen no se
+            instalan globalmente en Windows.
 
-            Los modelos se descargan desde la aplicacion cuando se utilizan
-            por primera vez y quedan guardados en la cache local.
+            Los modelos de voz se descargan bajo demanda y quedan en caché local.
           generateReleaseNotes: true
           releaseDraft: false
           prerelease: false
           args: --bundles nsis
-          releaseAssetNamePattern: "Voice-Studio-AI_[version]_Windows_[arch][setup].[ext]"
           uploadWorkflowArtifacts: true
-          workflowArtifactNamePattern: "Voice-Studio-AI_[version]_Windows_[arch]"
 
-      - name: Verificar que la Release existe
+      - name: Verificar Release
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ steps.meta.outputs.tag }}
-        run: |
-          gh release view "$env:RELEASE_TAG" --repo "${{ github.repository }}" --json tagName,name,url,assets
-
-      - name: Resumen
-        shell: pwsh
-        env:
-          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
-        run: |
-          "## Release publicada" >> $env:GITHUB_STEP_SUMMARY
-          "" >> $env:GITHUB_STEP_SUMMARY
-          "- Tag: $env:RELEASE_TAG" >> $env:GITHUB_STEP_SUMMARY
-          "- Setup.exe publicado en GitHub Releases" >> $env:GITHUB_STEP_SUMMARY
-          "- Instalador guardado tambien como workflow artifact" >> $env:GITHUB_STEP_SUMMARY
+        run: gh release view "$env:RELEASE_TAG" --repo "${{ github.repository }}" --json tagName,name,url,assets

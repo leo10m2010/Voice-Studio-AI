@@ -1,6 +1,6 @@
 [package]
 name = "qwen-voice-studio"
-version = "0.6.12"
+version = "0.7.0"
 description = "Desktop interface for local Qwen3-TTS voice cloning"
 authors = ["Qwen Voice Studio"]
 edition = "2021"
@@ -16,3 +16,7 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+hex = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+sha2 = "0.10"

@@ -1568,7 +1568,54 @@ def generate(request: GenerateRequest):
         ) from exc
 
 
+def packaging_self_test() -> int:
+    """
+    Lightweight packaged-runtime test.
+    It intentionally does NOT download a model. It verifies that the frozen
+    engine can import the exact runtime stack needed before NSIS is attempted.
+    """
+    checks = []
+
+    def check(label, fn):
+        try:
+            value = fn()
+            checks.append((label, True, str(value or "OK")))
+        except Exception as exc:
+            checks.append((label, False, f"{type(exc).__name__}: {exc}"))
+
+    check("numpy", lambda: __import__("numpy").__version__)
+    check("soundfile", lambda: __import__("soundfile").__version__)
+    check("librosa", lambda: __import__("librosa").__version__)
+    check("torch", lambda: __import__("torch").__version__)
+    check("transformers", lambda: __import__("transformers").__version__)
+    check("accelerate", lambda: __import__("accelerate").__version__)
+    check("huggingface_hub", lambda: __import__("huggingface_hub").__version__)
+
+    def qwen_check():
+        from qwen_tts import Qwen3TTSModel
+        return Qwen3TTSModel.__name__
+
+    check("qwen_tts.Qwen3TTSModel", qwen_check)
+
+    print("VOICE_STUDIO_ENGINE_SELF_TEST")
+    failed = False
+    for label, ok, detail in checks:
+        mark = "PASS" if ok else "FAIL"
+        print(f"[{mark}] {label}: {detail}")
+        failed = failed or not ok
+
+    if failed:
+        print("SELF_TEST_RESULT=FAIL")
+        return 2
+
+    print("SELF_TEST_RESULT=PASS")
+    return 0
+
+
 if __name__ == "__main__":
+    if "--self-test-packaging" in sys.argv:
+        raise SystemExit(packaging_self_test())
+
     import uvicorn
 
     print()

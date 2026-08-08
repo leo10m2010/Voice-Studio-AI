@@ -30,7 +30,7 @@ Write-Host "Verificando runtime..."
 & $py -c "import torch; import qwen_tts; print('Torch:', torch.__version__); print('CUDA runtime:', torch.version.cuda); print('qwen_tts: OK')"
 
 Write-Host ""
-Write-Host "Empaquetando sidecar Python..."
+Write-Host "Empaquetando sidecar Python LEAN..."
 powershell -ExecutionPolicy Bypass -File ".\scripts\build-engine-windows.ps1"
 
 $engineBytes = (
