@@ -129,11 +129,17 @@ def transcode_music_to_wav(
         raise RuntimeError("La música es demasiado corta.")
 
     stem = _clean_stem(original_name or source_path.name)
-    target = destination_dir / f"{stem}.wav"
+    used_stems = {
+        path.stem.casefold()
+        for path in destination_dir.iterdir()
+        if path.is_file() and path.suffix.lower() in {".wav", ".mp3", ".flac", ".ogg"}
+    }
+    candidate = stem
     i = 2
-    while target.exists():
-        target = destination_dir / f"{stem}_{i}.wav"
+    while candidate.casefold() in used_stems:
+        candidate = f"{stem}_{i}"
         i += 1
+    target = destination_dir / f"{candidate}.wav"
 
     sf.write(str(target), data, sr, format="WAV", subtype="PCM_16")
 

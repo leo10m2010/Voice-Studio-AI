@@ -206,13 +206,14 @@ Los fondos se guardan localmente.
 
 Qwen solo genera la voz.
 
-La mezcla:
+La mezcla final:
 
 ```text
 voz + música
 ```
 
-se hace en la interfaz mediante Web Audio API.
+se hace en el motor Python local antes de guardar el WAV/FLAC. El navegador
+solo reproduce el archivo definitivo.
 
 La música no se envía a ningún servicio externo.
 

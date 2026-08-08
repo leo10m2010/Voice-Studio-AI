@@ -43,22 +43,10 @@ if (!existsSync(viteEntry)) {
 console.log("");
 console.log("Iniciando motor Qwen local...");
 
-const engine = spawn(
-  python,
-  [resolve(root, "engine/server.py")],
-  {
-    cwd: root,
-    stdio: "inherit",
-    env: {
-      ...process.env,
-      QWEN_STUDIO_ROOT: root,
-      QWEN_ENGINE_PORT: "8765"
-    }
-  }
-);
-
+let engine = null;
 let vite = null;
 let shuttingDown = false;
+let engineExited = false;
 
 function shutdown(exitCode = 0) {
   if (shuttingDown) return;
@@ -79,18 +67,45 @@ function shutdown(exitCode = 0) {
   setTimeout(() => process.exit(exitCode), 150);
 }
 
-engine.on("error", error => {
-  console.error("");
-  console.error("No se pudo iniciar el motor Python:");
-  console.error(error);
-  shutdown(1);
-});
+function probePython() {
+  return new Promise(resolve => {
+    const probe = spawn(
+      python,
+      ["-c", "import sys; print(sys.version)"],
+      { cwd: root, stdio: ["ignore", "pipe", "pipe"] }
+    );
+    let stderr = "";
+    probe.stderr.on("data", chunk => {
+      stderr += chunk.toString();
+    });
+    probe.on("error", error => resolve({ ok: false, detail: error.message }));
+    probe.on("exit", code =>
+      resolve({
+        ok: code === 0,
+        detail: stderr.trim() || `código de salida ${code}`
+      })
+    );
+  });
+}
 
-engine.on("exit", code => {
-  if (!shuttingDown && code && code !== 0) {
-    console.error(`El motor Qwen terminó con código ${code}.`);
+async function waitForEngine(timeoutMs = 30000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (engineExited) {
+      throw new Error("El motor Python terminó antes de publicar su API.");
+    }
+    try {
+      const response = await fetch("http://127.0.0.1:8765/api/health", {
+        signal: AbortSignal.timeout(1200)
+      });
+      if (response.ok) return;
+    } catch {}
+    await new Promise(resolve => setTimeout(resolve, 250));
   }
-});
+  throw new Error(
+    "El motor Python no respondió en 30 segundos. Revisa el diagnóstico del entorno."
+  );
+}
 
 function startVite() {
   console.log("Iniciando interfaz...");
@@ -129,8 +144,51 @@ function startVite() {
   });
 }
 
-// Le damos un instante al servidor Python antes de abrir la interfaz.
-setTimeout(startVite, 1200);
+async function boot() {
+  const probe = await probePython();
+  if (!probe.ok) {
+    throw new Error(
+      `El entorno Python no puede iniciarse (${python}). ${probe.detail}\n` +
+        "Recréalo con scripts/setup-windows.ps1 o instala Python 3.12."
+    );
+  }
+
+  engine = spawn(
+    python,
+    [resolve(root, "engine/server.py")],
+    {
+      cwd: root,
+      stdio: "inherit",
+      env: {
+        ...process.env,
+        QWEN_STUDIO_ROOT: root,
+        QWEN_ENGINE_PORT: "8765"
+      }
+    }
+  );
+
+  engine.on("error", error => {
+    engineExited = true;
+    console.error("\nNo se pudo iniciar el motor Python:");
+    console.error(error);
+  });
+
+  engine.on("exit", code => {
+    engineExited = true;
+    if (!shuttingDown && code && code !== 0) {
+      console.error(`El motor Qwen terminó con código ${code}.`);
+    }
+  });
+
+  await waitForEngine();
+  startVite();
+}
+
+boot().catch(error => {
+  console.error("\nNo se pudo preparar la prueba local:");
+  console.error(error.message || error);
+  shutdown(1);
+});
 
 process.on("SIGINT", () => shutdown(0));
 process.on("SIGTERM", () => shutdown(0));

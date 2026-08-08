@@ -718,7 +718,13 @@ fn spawn_engine(_app: &AppHandle) -> Result<Child, String> {
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit());
 
-        return command.spawn().map_err(|error| error.to_string());
+        return command.spawn().map_err(|error| {
+            format!(
+                "No se pudo iniciar el motor Python en {}. Ejecuta scripts/setup-windows.ps1. Error: {}",
+                python.display(),
+                error
+            )
+        });
     }
 
     #[cfg(not(debug_assertions))]

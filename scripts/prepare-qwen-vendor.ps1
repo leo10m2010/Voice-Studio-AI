@@ -29,6 +29,21 @@ Write-Host "Origen: $qwenSource" -ForegroundColor DarkGray
 
 Copy-Item $qwenSource $qwenTarget -Recurse -Force
 
+$requiredQwenFiles = @(
+    "inference\qwen3_tts_model.py",
+    "inference\qwen3_tts_tokenizer.py",
+    "core\models\configuration_qwen3_tts.py",
+    "core\models\modeling_qwen3_tts.py",
+    "core\models\processing_qwen3_tts.py",
+    "core\tokenizer_12hz\configuration_qwen3_tts_tokenizer_v2.py",
+    "core\tokenizer_12hz\modeling_qwen3_tts_tokenizer_v2.py"
+)
+foreach ($relative in $requiredQwenFiles) {
+    if (-not (Test-Path (Join-Path $qwenTarget $relative))) {
+        throw "Falta un archivo requerido de Qwen3-TTS 12Hz: $relative"
+    }
+}
+
 # La app solo usa la familia Qwen3-TTS Tokenizer 12Hz.
 $removePaths = @(
     (Join-Path $qwenTarget "cli"),
@@ -40,13 +55,18 @@ foreach ($path in $removePaths) {
     }
 }
 
+Get-ChildItem $qwenTarget -Recurse -Directory -Filter "__pycache__" -ErrorAction SilentlyContinue |
+    Remove-Item -Recurse -Force
+Get-ChildItem $qwenTarget -Recurse -File -Filter "*.pyc" -ErrorAction SilentlyContinue |
+    Remove-Item -Force
+
 # qwen_tts.__init__ upstream también importa el wrapper genérico del tokenizer.
 # Lo conservamos, pero su implementación se parchea abajo para registrar solo V2/12Hz.
 $tokenizerFile = Join-Path $qwenTarget "inference\qwen3_tts_tokenizer.py"
 $tokenizer = Get-Content $tokenizerFile -Raw
 
 # Regex tolera tanto LF como CRLF del wheel de Python.
-$importPattern = '(?ms)^from \.\.core import \(\s*Qwen3TTSTokenizerV1Config,\s*Qwen3TTSTokenizerV1Model,\s*Qwen3TTSTokenizerV2Config,\s*Qwen3TTSTokenizerV2Model,\s*\)\s*'
+$importPattern = '(?ms)^from \.\.core import \(.*?\)\s*\r?\n'
 $newImport = @'
 from ..core.tokenizer_12hz.configuration_qwen3_tts_tokenizer_v2 import Qwen3TTSTokenizerV2Config
 from ..core.tokenizer_12hz.modeling_qwen3_tts_tokenizer_v2 import Qwen3TTSTokenizerV2Model
@@ -59,15 +79,20 @@ if ($patched -eq $tokenizer) {
 }
 $tokenizer = $patched
 
-$registerPattern = '(?ms)^\s*AutoConfig\.register\("qwen3_tts_tokenizer_25hz",\s*Qwen3TTSTokenizerV1Config\)\s*\r?\n\s*AutoModel\.register\(Qwen3TTSTokenizerV1Config,\s*Qwen3TTSTokenizerV1Model\)\s*\r?\n'
-$patched = [regex]::Replace($tokenizer, $registerPattern, '', 1)
-if ($patched -eq $tokenizer) {
-    throw "No se encontró el registro del tokenizer 25Hz esperado."
+$registerPatterns = @(
+    '(?m)^\s*AutoConfig\.register\("qwen3_tts_tokenizer_25hz",\s*Qwen3TTSTokenizerV1Config\)\s*\r?\n',
+    '(?m)^\s*AutoModel\.register\(Qwen3TTSTokenizerV1Config,\s*Qwen3TTSTokenizerV1Model\)\s*\r?\n'
+)
+foreach ($pattern in $registerPatterns) {
+    $tokenizer = [regex]::Replace($tokenizer, $pattern, '')
 }
-$tokenizer = $patched
 
 if ($tokenizer.Contains("Qwen3TTSTokenizerV1Config") -or $tokenizer.Contains("Qwen3TTSTokenizerV1Model")) {
     throw "El wrapper de tokenizer todavía contiene referencias V1/25Hz después del parche."
+}
+if ($tokenizer -match '(?m)^\s*from \.\.core import' -or
+    $tokenizer -match 'AutoConfig\.register\("qwen3_tts_tokenizer_25hz"') {
+    throw "El wrapper de tokenizer todavía importa o registra el tokenizer 25Hz después del parche."
 }
 
 Set-Content -Path $tokenizerFile -Value $tokenizer -Encoding UTF8
@@ -84,6 +109,24 @@ __all__ = [
     "Qwen3TTSTokenizerV2Model",
 ]
 '@ | Set-Content -Path $coreInit -Encoding UTF8
+
+# The upstream wheel currently ships tokenizer_12hz as a namespace package.
+# Give PyInstaller an explicit package marker so the relative imports survive
+# the frozen build on Windows.
+$tokenizer12Init = Join-Path $qwenTarget "core\tokenizer_12hz\__init__.py"
+@'
+# Voice Studio AI packaged runtime: Qwen3-TTS 12Hz tokenizer.
+'@ | Set-Content -Path $tokenizer12Init -Encoding UTF8
+if (-not (Test-Path $tokenizer12Init)) {
+    throw "No se pudo crear el marcador de paquete tokenizer_12hz."
+}
+
+if (Test-Path (Join-Path $qwenTarget "core\tokenizer_25hz")) {
+    throw "El vendor final todavía contiene tokenizer_25hz."
+}
+if (-not (Select-String -Path $tokenizerFile -Pattern "tokenizer_12hz.configuration_qwen3_tts_tokenizer_v2" -Quiet)) {
+    throw "El wrapper final no registra el tokenizer 12Hz V2."
+}
 
 Write-Host "Vendor 12Hz listo: $vendorRoot" -ForegroundColor Green
 Write-Output $vendorRoot

@@ -33,6 +33,12 @@ try {
     if ($oldPythonPath) { $env:PYTHONPATH = "$vendorRoot;$oldPythonPath" }
     else { $env:PYTHONPATH = "$vendorRoot" }
 
+    Write-Host "Validando import de Qwen3-TTS 12Hz antes de PyInstaller..."
+    & $py -c "from qwen_tts import Qwen3TTSModel; from qwen_tts.core.tokenizer_12hz.configuration_qwen3_tts_tokenizer_v2 import Qwen3TTSTokenizerV2Config; from qwen_tts.core.tokenizer_12hz.modeling_qwen3_tts_tokenizer_v2 import Qwen3TTSTokenizerV2Model; print('Qwen3-TTS 12Hz import: OK')"
+    if ($LASTEXITCODE -ne 0) {
+        throw "El vendor de Qwen3-TTS 12Hz no se puede importar. Se cancela el empaquetado."
+    }
+
     & $py -m PyInstaller `
         --noconfirm `
         --clean `
@@ -73,6 +79,24 @@ finally {
 
 $engineExe = Join-Path $engineFolder "qwen-engine.exe"
 if (-not (Test-Path $engineExe)) { throw "PyInstaller no generó $engineExe" }
+
+$packagedQwen = Join-Path $engineFolder "_internal\qwen_tts"
+$packagedRequired = @(
+    "__init__.py",
+    "inference\qwen3_tts_model.py",
+    "inference\qwen3_tts_tokenizer.py",
+    "core\tokenizer_12hz\__init__.py",
+    "core\tokenizer_12hz\configuration_qwen3_tts_tokenizer_v2.py",
+    "core\tokenizer_12hz\modeling_qwen3_tts_tokenizer_v2.py"
+)
+foreach ($relative in $packagedRequired) {
+    if (-not (Test-Path (Join-Path $packagedQwen $relative))) {
+        throw "El paquete PyInstaller no contiene el archivo Qwen requerido: $relative"
+    }
+}
+if (Test-Path (Join-Path $packagedQwen "core\tokenizer_25hz")) {
+    throw "El paquete PyInstaller contiene tokenizer_25hz; se publicaría un runtime incorrecto."
+}
 
 Write-Host ""
 Write-Host "Self-test del motor..."

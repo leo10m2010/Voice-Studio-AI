@@ -35,6 +35,22 @@ if (-not $pythonCommand) {
     exit 1
 }
 
+if (Test-Path ".venv\Scripts\python.exe") {
+    $existingPy = (Resolve-Path ".venv\Scripts\python.exe").Path
+    $venvHealthy = $true
+    try {
+        & $existingPy -c "import sys; print(sys.version)" 2>$null
+        if ($LASTEXITCODE -ne 0) { $venvHealthy = $false }
+    } catch {
+        $venvHealthy = $false
+    }
+    if (-not $venvHealthy) {
+        Write-Host "El entorno .venv existe, pero apunta a una instalacion de Python que ya no esta disponible." -ForegroundColor Yellow
+        Write-Host "Recreando .venv con Python 3.12..." -ForegroundColor Yellow
+        Remove-Item -LiteralPath ".venv" -Recurse -Force
+    }
+}
+
 if (-not (Test-Path ".venv\Scripts\python.exe")) {
     Write-Host "Creando entorno virtual .venv..."
     if ($pythonCommand -eq "py -3.12") {

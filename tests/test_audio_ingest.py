@@ -41,5 +41,26 @@ class AudioIngestTests(unittest.TestCase):
             self.assertEqual(info.channels,2)
             self.assertEqual(info.samplerate,44100)
 
+    def test_canonical_name_does_not_collide_with_other_audio_extension(self):
+        sr = 22050
+        audio = np.zeros(sr // 2, dtype=np.float32)
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            source = td / "voice.wav"
+            output = td / "out"
+            output.mkdir()
+            sf.write(source, audio, sr)
+            # IDs in the app are based on Path.stem, so a different container
+            # with the same stem must not receive the same canonical stem.
+            (output / "voice.mp3").write_bytes(b"not really audio")
+
+            result = transcode_music_to_wav(
+                source,
+                output,
+                original_name="voice.mp3",
+            )
+
+            self.assertNotEqual(result["path"].stem.casefold(), "voice")
+
 if __name__=="__main__":
     unittest.main()

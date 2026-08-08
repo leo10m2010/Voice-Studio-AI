@@ -126,11 +126,22 @@ os.environ["HUGGINGFACE_HUB_CACHE"] = str(HF_HOME / "hub")
 
 ALLOWED_AUDIO = {".wav", ".mp3", ".flac", ".ogg"}
 MAX_UPLOAD_MB = 80
+FETCH_REMOTE_AVATARS = os.environ.get("QWEN_STUDIO_FETCH_AVATARS", "0").lower() in {
+    "1",
+    "true",
+    "yes",
+}
 
 app = FastAPI(title="Qwen Voice Studio Local Engine", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://127.0.0.1:5173",
+        "http://localhost:5173",
+        "tauri://localhost",
+        "http://tauri.localhost",
+        "https://tauri.localhost",
+    ],
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -162,6 +173,13 @@ def huggingface_author_avatar(author: str) -> Optional[str]:
         return None
     if author in _HF_AVATAR_CACHE:
         return _HF_AVATAR_CACHE[author]
+
+    # Avatars are decorative. Do not make the local app wait on Hugging Face
+    # during startup or every refresh when the user is offline. Set
+    # QWEN_STUDIO_FETCH_AVATARS=1 to opt into the best-effort lookup.
+    if not FETCH_REMOTE_AVATARS:
+        _HF_AVATAR_CACHE[author] = None
+        return None
 
     value = None
     encoded = quote(author, safe="")
@@ -292,24 +310,47 @@ def transcript_path(audio_path: Path) -> Path:
 
 
 def copy_seed_assets() -> None:
-    seeds = [
-        (PROJECT_ROOT / "assets" / "voice", VOICES_DIR),
-        (PROJECT_ROOT / "assets" / "sonidos", SOUNDS_DIR),
-    ]
+    voice_dir = PROJECT_ROOT / "assets" / "voice"
+    sound_dir = PROJECT_ROOT / "assets" / "sonidos"
 
-    for source_dir, target_dir in seeds:
-        if not source_dir.exists():
-            continue
-        for source in source_dir.iterdir():
+    if voice_dir.exists():
+        for source in voice_dir.iterdir():
             if not source.is_file() or source.suffix.lower() not in ALLOWED_AUDIO:
                 continue
-            target = target_dir / source.name
-            if not target.exists():
+            target = VOICES_DIR / source.name
+            if target.exists():
+                continue
+            try:
+                shutil.copy2(source, target)
+                sidecar = transcript_path(source)
+                if sidecar.exists():
+                    shutil.copy2(sidecar, transcript_path(target))
+            except OSError:
+                pass
+
+    if sound_dir.exists():
+        for source in sound_dir.iterdir():
+            if not source.is_file() or source.suffix.lower() not in ALLOWED_AUDIO:
+                continue
+
+            # The bundled library is published as MP3, while the mixer and
+            # validator expect canonical WAV files. Convert seeds once so the
+            # built-in music is usable immediately after first launch.
+            canonical = SOUNDS_DIR / f"{source.stem}.wav"
+            if canonical.exists():
+                continue
+            try:
+                transcode_music_to_wav(
+                    source_path=source,
+                    destination_dir=SOUNDS_DIR,
+                    original_name=source.name,
+                    target_sr=44100,
+                )
+            except Exception:
+                # Keep the original available for the repair action if a
+                # codec is unavailable in a reduced installation.
                 try:
-                    shutil.copy2(source, target)
-                    sidecar = transcript_path(source)
-                    if sidecar.exists():
-                        shutil.copy2(sidecar, transcript_path(target))
+                    shutil.copy2(source, SOUNDS_DIR / source.name)
                 except OSError:
                     pass
 
@@ -733,6 +774,8 @@ def get_voice_reference_info(audio_path: Path) -> dict:
 
 def split_text_for_tts(text: str, max_chars: int = 460) -> list[str]:
     text = re.sub(r"\s+", " ", text.strip())
+    if max_chars < 1:
+        raise ValueError("max_chars debe ser mayor que cero.")
     if len(text) <= max_chars:
         return [text]
 
@@ -740,13 +783,40 @@ def split_text_for_tts(text: str, max_chars: int = 460) -> list[str]:
     chunks = []
     current = ""
 
+    def split_long_sentence(sentence: str) -> list[str]:
+        words = sentence.split()
+        parts = []
+        part = ""
+        for word in words:
+            # A URL or an unusually long token must not make the generated
+            # request exceed the model's chunk limit.
+            if len(word) > max_chars:
+                if part:
+                    parts.append(part)
+                    part = ""
+                parts.extend(
+                    word[start : start + max_chars]
+                    for start in range(0, len(word), max_chars)
+                )
+                continue
+
+            candidate = f"{part} {word}".strip()
+            if part and len(candidate) > max_chars:
+                parts.append(part)
+                part = word
+            else:
+                part = candidate
+        if part:
+            parts.append(part)
+        return parts or [sentence[:max_chars]]
+
     for sentence in sentences:
         sentence = sentence.strip()
         if not sentence:
             continue
 
         if len(sentence) > max_chars:
-            parts = re.split(r"(?<=,)\s+", sentence)
+            parts = split_long_sentence(sentence)
         else:
             parts = [sentence]
 
@@ -1246,7 +1316,16 @@ async def save_upload(file: UploadFile, destination_dir: Path) -> Path:
     filename = safe_filename(file.filename or f"audio{suffix}")
     target = destination_dir / filename
 
-    if target.exists():
+    # IDs are derived from Path.stem. Keep stems unique as well as full file
+    # names unique; otherwise foo.mp3 and foo.wav become indistinguishable to
+    # find_audio(), prepared-reference caches, and the frontend.
+    stem_taken = any(
+        path.is_file()
+        and path.suffix.lower() in ALLOWED_AUDIO
+        and path.stem.casefold() == target.stem.casefold()
+        for path in destination_dir.iterdir()
+    )
+    if target.exists() or stem_taken:
         target = destination_dir / f"{target.stem}_{uuid.uuid4().hex[:5]}{target.suffix}"
 
     size = 0
@@ -1280,9 +1359,20 @@ async def import_voice(
         transcript_path(target).write_text(clean_transcript, encoding="utf-8")
 
     try:
-        _, metadata = prepare_reference_audio(target, force=True)
-    except Exception:
-        metadata = get_voice_reference_info(target)
+        prepared_path, metadata = prepare_reference_audio(target, force=True)
+        if not prepared_path.exists() or not metadata.get("prepared_analysis", {}).get(
+            "duration"
+        ):
+            raise RuntimeError("El archivo no contiene audio decodificable.")
+    except Exception as exc:
+        target.unlink(missing_ok=True)
+        transcript_path(target).unlink(missing_ok=True)
+        prepared_voice_path(target).unlink(missing_ok=True)
+        voice_meta_path(target).unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=400,
+            detail=f"No se pudo preparar '{file.filename or target.name}'. {exc}",
+        ) from exc
 
     return {
         "id": target.stem,
@@ -1593,7 +1683,18 @@ def packaging_self_test() -> int:
 
     def qwen_check():
         from qwen_tts import Qwen3TTSModel
-        return Qwen3TTSModel.__name__
+        from qwen_tts.core.tokenizer_12hz.configuration_qwen3_tts_tokenizer_v2 import (
+            Qwen3TTSTokenizerV2Config,
+        )
+        from qwen_tts.core.tokenizer_12hz.modeling_qwen3_tts_tokenizer_v2 import (
+            Qwen3TTSTokenizerV2Model,
+        )
+
+        return (
+            f"{Qwen3TTSModel.__name__}, "
+            f"{Qwen3TTSTokenizerV2Config.__name__}, "
+            f"{Qwen3TTSTokenizerV2Model.__name__}"
+        )
 
     check("qwen_tts.Qwen3TTSModel", qwen_check)
 
