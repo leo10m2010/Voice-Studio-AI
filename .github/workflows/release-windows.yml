@@ -41,6 +41,39 @@ jobs:
       - name: Setup Rust estable
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Verificar commit y fix Rust
+        shell: pwsh
+        run: |
+          Write-Host "Commit que se está compilando:"
+          git rev-parse HEAD
+          git log -1 --oneline
+
+          $rust = Get-Content ".\src-tauri\src\lib.rs" -Raw
+
+          Write-Host ""
+          Write-Host "Fragmento de cierre del engine:"
+          Get-Content ".\src-tauri\src\lib.rs" |
+            Select-String -Pattern "take_engine_child|terminate_engine|window.state" -Context 2,4
+
+          if ($rust.Contains("if let Ok(mut guard) = state.0.lock()")) {
+            throw @"
+ESTE WORKFLOW ESTA COMPILANDO CODIGO ANTIGUO.
+
+Se encontró la implementación Rust anterior que provoca E0597:
+    if let Ok(mut guard) = state.0.lock()
+
+No continúes con este tag/commit.
+Sube primero la versión corregida y crea UN TAG NUEVO después del commit.
+"@
+          }
+
+          if (-not $rust.Contains("terminate_engine(state.inner())")) {
+            throw "No se encontró el fix Rust esperado en src-tauri/src/lib.rs."
+          }
+
+          Write-Host ""
+          Write-Host "Fix Rust correcto detectado." -ForegroundColor Green
+
       - name: Resolver versión y tag de Release
         id: meta
         shell: pwsh
@@ -58,6 +91,18 @@ jobs:
 
           Write-Host "Versión: $version"
           Write-Host "Release tag: $tag"
+
+
+- name: Comprobar referencia de ejecución
+  shell: pwsh
+  run: |
+    Write-Host "GITHUB_REF      = $env:GITHUB_REF"
+    Write-Host "GITHUB_REF_TYPE = $env:GITHUB_REF_TYPE"
+    Write-Host "GITHUB_REF_NAME = $env:GITHUB_REF_NAME"
+    Write-Host "GITHUB_SHA      = $env:GITHUB_SHA"
+    Write-Host ""
+    git status --short
+    git log -1 --decorate --oneline
 
       - name: Comprobar versiones sincronizadas
         shell: pwsh

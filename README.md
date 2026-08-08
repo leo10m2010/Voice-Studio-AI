@@ -586,3 +586,20 @@ for it, so no `MutexGuard` outlives the local Tauri `State`.
 
 GitHub Actions now runs `cargo check` before the expensive Python/PyTorch
 packaging step.
+
+
+---
+
+# V0.6.11 — stale-tag guard
+
+The repeated E0597 log proved GitHub was compiling an older Rust source.
+Both workflows now inspect the exact checked-out commit and abort if the
+old `state.0.lock()` window-event implementation is present.
+
+Before creating a release tag run:
+
+```powershell
+npm run release:pretag
+```
+
+Create a fresh tag only after the fixed commit is already pushed.
