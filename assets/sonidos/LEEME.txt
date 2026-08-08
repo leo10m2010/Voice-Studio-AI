@@ -1,0 +1,7 @@
+PON AQUÍ TUS SONIDOS O MÚSICAS.
+
+Ejemplos:
+Alegria.mp3
+Cumbia.mp3
+
+Después abre/reinicia la web y pulsa "Actualizar".

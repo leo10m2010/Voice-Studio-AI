@@ -1,0 +1,22 @@
+{
+  "name": "voice-studio-ai",
+  "version": "0.6.8",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build",
+    "local": "node scripts/dev-local.mjs",
+    "desktop": "tauri dev",
+    "tauri": "tauri",
+    "build:windows": "powershell -ExecutionPolicy Bypass -File .\\scripts\\build-app-windows.ps1",
+    "release:check": "powershell -ExecutionPolicy Bypass -File .\\scripts\\check-release-version.ps1"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.8.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.8.0",
+    "vite": "^7.1.0"
+  }
+}

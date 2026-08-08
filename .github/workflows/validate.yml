@@ -1,0 +1,54 @@
+name: Validate
+
+on:
+  push:
+    branches:
+      - "**"
+    tags-ignore:
+      - "v*"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate frontend and source
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install frontend dependencies
+        shell: pwsh
+        run: npm install
+
+      - name: Check synchronized version
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File .\scripts\check-release-version.ps1
+
+      - name: Check JavaScript syntax
+        shell: pwsh
+        run: node --check .\src\main.js
+
+      - name: Check Python syntax
+        shell: pwsh
+        run: |
+          python -c "from pathlib import Path; p=Path('engine/server.py'); compile(p.read_text(encoding='utf-8'), str(p), 'exec'); print('engine/server.py: OK')"
+
+      - name: Build frontend
+        shell: pwsh
+        run: npm run build

@@ -1,0 +1,18 @@
+[package]
+name = "qwen-voice-studio"
+version = "0.6.8"
+description = "Desktop interface for local Qwen3-TTS voice cloning"
+authors = ["Qwen Voice Studio"]
+edition = "2021"
+
+[lib]
+name = "qwen_voice_studio_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

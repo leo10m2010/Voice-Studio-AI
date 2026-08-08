@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.venv/
+src-tauri/target/
+engine/build/
+engine/*.spec
+engine-dist/qwen-engine/
+*.log
+.DS_Store

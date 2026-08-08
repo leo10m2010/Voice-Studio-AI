@@ -1,0 +1,7 @@
+PON AQUÍ TUS AUDIOS DE VOZ.
+
+Ejemplos:
+Locutor_Comercial.mp3
+Narradora.wav
+
+Después abre/reinicia la web y pulsa "Actualizar".
