@@ -655,3 +655,11 @@ PyTorch and qwen-tts are installed as a private downloadable runtime during
 the visual first-run setup.
 
 See `ENGINE_MANAGER.md`.
+
+
+---
+
+# v0.7.1 — Rust ownership fix
+
+Fixes `E0505` in the Engine Manager catalog by making
+`recommended_flavor` an owned `String` before moving the manifest.

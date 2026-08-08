@@ -188,7 +188,7 @@ fn engine_running(state: &EngineProcess) -> bool {
     false
 }
 
-fn engine_status_value(app: &AppHandle, process: &EngineProcess) -> Result<EngineStatus, String> {
+fn engine_status_value(_app: &AppHandle, process: &EngineProcess) -> Result<EngineStatus, String> {
     #[cfg(debug_assertions)]
     {
         let root = debug_project_root();
@@ -211,6 +211,7 @@ fn engine_status_value(app: &AppHandle, process: &EngineProcess) -> Result<Engin
 
     #[cfg(not(debug_assertions))]
     {
+        let app = _app;
         let runtime = runtime_dir(app)?;
         let executable = runtime_executable(app)?;
         let record = read_install_record(app);
@@ -690,7 +691,7 @@ fn install_engine_blocking(
     engine_status_value(&app, &dummy)
 }
 
-fn spawn_engine(app: &AppHandle) -> Result<Child, String> {
+fn spawn_engine(_app: &AppHandle) -> Result<Child, String> {
     #[cfg(debug_assertions)]
     {
         let root = debug_project_root();
@@ -722,6 +723,7 @@ fn spawn_engine(app: &AppHandle) -> Result<Child, String> {
 
     #[cfg(not(debug_assertions))]
     {
+        let app = _app;
         let executable = runtime_executable(app)?;
         if !executable.exists() {
             return Err("ENGINE_NOT_INSTALLED".into());
@@ -759,25 +761,25 @@ fn engine_catalog(
     let hardware = detect_hardware_value();
     let status = engine_status_value(&app, process.inner())?;
 
-    let preferred = if hardware.recommended_flavor == "nvidia"
+    let recommended_flavor = if hardware.recommended_flavor == "nvidia"
         && manifest.engines.iter().any(|item| item.flavor == "nvidia")
     {
-        "nvidia"
+        "nvidia".to_string()
     } else if manifest.engines.iter().any(|item| item.flavor == "cpu") {
-        "cpu"
+        "cpu".to_string()
     } else {
         manifest
             .engines
             .first()
-            .map(|item| item.flavor.as_str())
-            .unwrap_or("cpu")
+            .map(|item| item.flavor.clone())
+            .unwrap_or_else(|| "cpu".to_string())
     };
 
     Ok(EngineCatalog {
         manifest,
         hardware,
         status,
-        recommended_flavor: preferred.into(),
+        recommended_flavor,
     })
 }
 
@@ -869,14 +871,14 @@ fn stop_engine(state: State<EngineProcess>) -> Result<(), String> {
 
 #[tauri::command]
 fn uninstall_engine(
-    app: AppHandle,
+    _app: AppHandle,
     process: State<EngineProcess>,
 ) -> Result<(), String> {
     terminate_engine(process.inner())?;
 
     #[cfg(not(debug_assertions))]
     {
-        let runtime = runtime_dir(&app)?;
+        let runtime = runtime_dir(&_app)?;
         if runtime.exists() {
             fs::remove_dir_all(runtime).map_err(|error| error.to_string())?;
         }

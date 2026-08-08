@@ -74,6 +74,20 @@ jobs:
           python -c "from pathlib import Path; p=Path('engine/audio_mix.py'); compile(p.read_text(encoding='utf-8'), str(p), 'exec'); print('audio_mix.py OK')"
           python -c "from pathlib import Path; p=Path('engine/audio_ingest.py'); compile(p.read_text(encoding='utf-8'), str(p), 'exec'); print('audio_ingest.py OK')"
 
+      - name: Verificar ownership de engine_catalog
+        shell: pwsh
+        run: |
+          $rust = Get-Content ".\src-tauri\src\lib.rs" -Raw
+          if ($rust.Contains('map(|item| item.flavor.as_str())')) {
+            throw "Regresion E0505: engine_catalog vuelve a prestar flavor desde manifest."
+          }
+          if ($rust.Contains('recommended_flavor: preferred.into()')) {
+            throw "Regresion E0505: preferred sigue siendo un borrow antes de mover manifest."
+          }
+          if (-not $rust.Contains('map(|item| item.flavor.clone())')) {
+            throw "No se encontro el String owned esperado para recommended_flavor."
+          }
+
       - name: Cargo check Tauri
         shell: pwsh
         run: cargo check --manifest-path .\src-tauri\Cargo.toml
