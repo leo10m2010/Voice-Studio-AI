@@ -33,6 +33,9 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Setup Rust estable
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Instalar dependencias frontend
         shell: pwsh
         run: npm install
@@ -51,6 +54,10 @@ jobs:
           python -c "from pathlib import Path; p=Path('engine/server.py'); compile(p.read_text(encoding='utf-8'), str(p), 'exec'); print('engine/server.py: OK')"
           python -c "from pathlib import Path; p=Path('engine/audio_mix.py'); compile(p.read_text(encoding='utf-8'), str(p), 'exec'); print('engine/audio_mix.py: OK')"
           python -c "from pathlib import Path; p=Path('engine/audio_ingest.py'); compile(p.read_text(encoding='utf-8'), str(p), 'exec'); print('engine/audio_ingest.py: OK')"
+
+      - name: Cargo check Tauri
+        shell: pwsh
+        run: cargo check --manifest-path .\src-tauri\Cargo.toml
 
       - name: Build frontend
         shell: pwsh

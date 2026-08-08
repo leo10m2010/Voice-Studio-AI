@@ -571,3 +571,18 @@ verifies the GitHub Release with `gh release view`.
 
 Official GitHub actions were updated to Node 24-compatible majors:
 checkout v6, setup-node v6 and setup-python v6.
+
+
+---
+
+# V0.6.10 — Tauri Rust lifetime fix
+
+Fixed the Windows release compilation error:
+
+`error[E0597]: state does not live long enough`
+
+Engine shutdown now extracts the `Child` from the mutex before killing/waiting
+for it, so no `MutexGuard` outlives the local Tauri `State`.
+
+GitHub Actions now runs `cargo check` before the expensive Python/PyTorch
+packaging step.

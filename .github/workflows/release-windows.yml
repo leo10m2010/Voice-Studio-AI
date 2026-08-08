@@ -67,6 +67,10 @@ jobs:
         shell: pwsh
         run: npm install
 
+      - name: Cargo check Tauri antes del empaquetado pesado
+        shell: pwsh
+        run: cargo check --manifest-path .\src-tauri\Cargo.toml
+
       - name: Preparar motor Python + PyTorch CUDA
         shell: pwsh
         run: powershell -ExecutionPolicy Bypass -File .\scripts\prepare-release-engine.ps1

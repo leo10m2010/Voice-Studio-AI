@@ -99,15 +99,30 @@ fn start_engine(app: AppHandle, state: State<EngineProcess>) -> Result<String, S
     Ok("started".into())
 }
 
-#[tauri::command]
-fn stop_engine(state: State<EngineProcess>) -> Result<(), String> {
-    let mut guard = state.0.lock().map_err(|_| "No se pudo bloquear el estado.")?;
-    if let Some(child) = guard.as_mut() {
+fn take_engine_child(state: &EngineProcess) -> Result<Option<Child>, String> {
+    let mut guard = state
+        .0
+        .lock()
+        .map_err(|_| "No se pudo bloquear el estado del motor.".to_string())?;
+
+    Ok(guard.take())
+}
+
+fn terminate_engine(state: &EngineProcess) -> Result<(), String> {
+    // Extract the Child while holding the mutex, then release the lock before
+    // asking Windows to terminate/wait for the process. This avoids extending
+    // the MutexGuard lifetime into the end of the window-event block.
+    if let Some(mut child) = take_engine_child(state)? {
         let _ = child.kill();
         let _ = child.wait();
     }
-    *guard = None;
+
     Ok(())
+}
+
+#[tauri::command]
+fn stop_engine(state: State<EngineProcess>) -> Result<(), String> {
+    terminate_engine(state.inner())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -118,12 +133,9 @@ pub fn run() {
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {
                 let state = window.state::<EngineProcess>();
-                if let Ok(mut guard) = state.0.lock() {
-                    if let Some(child) = guard.as_mut() {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                    }
-                    *guard = None;
+
+                if let Err(error) = terminate_engine(state.inner()) {
+                    eprintln!("No se pudo cerrar el motor local: {error}");
                 }
             }
         })
