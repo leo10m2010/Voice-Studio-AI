@@ -2,6 +2,7 @@ import "./styles.css";
 
 const API = "http://127.0.0.1:8765";
 const DEFAULT_MODEL_ID = "Qwen/Qwen3-TTS-12Hz-0.6B-Base";
+const REQUIRED_ENGINE_VERSION = "1.0.2";
 
 const icons = {
   wave: `<svg viewBox="0 0 24 24"><path d="M4 13v-2M8 17V7M12 20V4M16 16V8M20 13v-2"/></svg>`,
@@ -47,6 +48,8 @@ const state = {
   waveformUrl: null,
   seeking: false,
   modelSearchTimer: null,
+  modelInstallTimer: null,
+  modelInstallId: null,
   activeSheet: null,
   selectedSoundId: "",
   engine: {
@@ -185,7 +188,7 @@ document.querySelector("#app").innerHTML = `
               <button class="reference-action pressable" id="improveClone" disabled>Revisar</button>
             </div>
 
-            <div class="setting-block">
+            <div class="setting-block model-setting-block">
               <label>Modelo</label>
               <button class="select-card model-select-card pressable" id="modelSelector">
                 <span class="model-avatar" id="selectedModelAvatar"><span>Q</span></span>
@@ -194,6 +197,18 @@ document.querySelector("#app").innerHTML = `
                   <small id="selectedModelMeta">Recomendado · Compatible</small>
                 </span>
                 <span class="chevron">${icons.chevron}</span>
+              </button>
+            </div>
+
+            <div class="model-install-card" id="modelInstallCard" data-state="checking" aria-live="polite">
+              <span class="model-install-icon">${icons.model}</span>
+              <span class="model-install-copy">
+                <small>MODELO DE VOZ</small>
+                <strong id="modelInstallTitle">Comprobando modelo…</strong>
+                <span id="modelInstallMeta">Buscando archivos locales.</span>
+              </span>
+              <button class="model-install-action pressable" id="installSelectedModel" type="button" disabled>
+                Comprobando
               </button>
             </div>
 
@@ -409,9 +424,9 @@ document.querySelector("#app").innerHTML = `
 
         <div class="setup-view active" id="engineIntroView">
           <div class="setup-hero">
-            <span class="setup-kicker">PRIMER INICIO</span>
+            <span class="setup-kicker" id="setupIntroKicker">PRIMER INICIO</span>
             <h1 id="engineSetupTitle">Preparamos el estudio por ti.</h1>
-            <p>Voice Studio AI descargará su motor de voz de forma segura. No necesitas instalar Python, PyTorch ni abrir una terminal.</p>
+            <p id="setupIntroBody">Voice Studio AI descargará su motor de voz de forma segura. No necesitas instalar Python, PyTorch ni abrir una terminal.</p>
           </div>
 
           <div class="setup-hardware-card">
@@ -533,6 +548,7 @@ const el = {
   hardware: $("#hardwareText"), voiceSelector: $("#voiceSelector"), selectedVoiceName: $("#selectedVoiceName"), selectedVoiceMeta: $("#selectedVoiceMeta"),
   referenceScore: $("#referenceScore"), referenceLabel: $("#referenceLabel"), referenceDetails: $("#referenceDetails"), improveClone: $("#improveClone"),
   modelSelector: $("#modelSelector"), selectedModelAvatar: $("#selectedModelAvatar"), selectedModelName: $("#selectedModelName"), selectedModelMeta: $("#selectedModelMeta"),
+  modelInstallCard: $("#modelInstallCard"), modelInstallTitle: $("#modelInstallTitle"), modelInstallMeta: $("#modelInstallMeta"), installSelectedModel: $("#installSelectedModel"),
   profileButtons: $("#profileButtons"), speed: $("#speed"), speedValue: $("#speedValue"), stability: $("#stability"), style: $("#style"),
   pitch: $("#pitch"), pitchValue: $("#pitchValue"), output: $("#outputFormat"), soundSelect: $("#soundSelect"), previewSound: $("#previewSound"),
   addSound: $("#addSound"), repairSounds: $("#repairSounds"), soundFile: $("#soundFile"), musicVolume: $("#musicVolume"), musicVolumeValue: $("#musicVolumeValue"), musicStatus: $("#musicStatus"),
@@ -548,6 +564,7 @@ const el = {
   engineMiniCard: $("#engineMiniCard"), engineMiniTitle: $("#engineMiniTitle"), engineMiniMeta: $("#engineMiniMeta"), manageEngine: $("#manageEngine"),
   engineSetup: $("#engineSetup"), engineSetupClose: $("#engineSetupClose"),
   engineIntroView: $("#engineIntroView"), engineProgressView: $("#engineProgressView"), engineDoneView: $("#engineDoneView"), engineManageView: $("#engineManageView"),
+  setupIntroKicker: $("#setupIntroKicker"), setupIntroTitle: $("#engineSetupTitle"), setupIntroBody: $("#setupIntroBody"),
   setupHardwareName: $("#setupHardwareName"), setupHardwareMeta: $("#setupHardwareMeta"), setupRecommended: $("#setupRecommended"),
   engineFlavorList: $("#engineFlavorList"), setupDownloadSize: $("#setupDownloadSize"), installEngineButton: $("#installEngineButton"),
   engineCatalogError: $("#engineCatalogError"), setupProgressKicker: $("#setupProgressKicker"), setupProgressTitle: $("#setupProgressTitle"),
@@ -586,6 +603,68 @@ function installAvatarFallbacks(root=document){
 function selectedModel(){
   return state.model || state.models.compatible.find(m=>m.id===state.models.recommended_id) || state.models.compatible[0] || null;
 }
+function modelInstallState(model){
+  if(!model)return "not_installed";
+  return model.install_state||(model.installed?"installed":"not_installed");
+}
+function applyModelInstallStatus(modelId,status){
+  const fields={
+    installed:Boolean(status.installed),
+    install_state:status.state||"not_installed",
+    install_message:status.message||"",
+    install_error:status.error||null,
+    downloaded_bytes:Number(status.downloaded_bytes||0),
+    expected_bytes:Number(status.expected_bytes||0)
+  };
+  state.models.compatible=(state.models.compatible||[]).map(model=>model.id===modelId?{...model,...fields}:model);
+  if(state.model?.id===modelId)state.model={...state.model,...fields};
+}
+function renderModelInstallStatus(){
+  const model=selectedModel();
+  if(!model){
+    el.modelInstallCard.dataset.state="not_installed";
+    el.modelInstallTitle.textContent="Selecciona un modelo";
+    el.modelInstallMeta.textContent="Elige un modelo compatible para instalarlo.";
+    el.installSelectedModel.textContent="Sin modelo";
+    el.installSelectedModel.disabled=true;
+    return;
+  }
+
+  const status=modelInstallState(model);
+  el.modelInstallCard.dataset.state=status;
+  el.installSelectedModel.classList.toggle("installed",status==="installed");
+
+  if(status==="installed"){
+    el.modelInstallTitle.textContent="Modelo instalado";
+    el.modelInstallMeta.textContent=`${model.name} · disponible sin conexión`;
+    el.installSelectedModel.innerHTML=`${icons.check}<span>Instalado</span>`;
+    el.installSelectedModel.disabled=true;
+    return;
+  }
+  if(status==="downloading"){
+    const downloaded=Number(model.downloaded_bytes||0);
+    const expected=Number(model.expected_bytes||0);
+    el.modelInstallTitle.textContent="Instalando modelo…";
+    el.modelInstallMeta.textContent=downloaded
+      ? `${humanBytes(downloaded)} descargados${expected?` · aprox. ${humanBytes(expected)}`:""}`
+      : "Conectando con Hugging Face. La descarga se reanuda si se interrumpe.";
+    el.installSelectedModel.innerHTML=`<span class="spinner"></span><span>Instalando</span>`;
+    el.installSelectedModel.disabled=true;
+    return;
+  }
+  if(status==="error"){
+    el.modelInstallTitle.textContent="Descarga interrumpida";
+    el.modelInstallMeta.textContent=model.install_message||"Revisa tu conexión y vuelve a intentarlo.";
+    el.installSelectedModel.textContent="Reintentar";
+    el.installSelectedModel.disabled=false;
+    return;
+  }
+
+  el.modelInstallTitle.textContent="Modelo no instalado";
+  el.modelInstallMeta.textContent=`${model.disk_gb?`${model.disk_gb} GB aprox. · `:""}se descarga una vez y queda en este equipo`;
+  el.installSelectedModel.textContent="Instalar modelo";
+  el.installSelectedModel.disabled=false;
+}
 function selectModel(id){
   const all=[...(state.models.compatible||[]),...(state.models.discovery||[])];
   const found=all.find(m=>m.id===id);
@@ -601,12 +680,13 @@ function selectModel(id){
 }
 function updateModelUI(){
   const m=selectedModel();
-  if(!m)return;
+  if(!m){renderModelInstallStatus();updateGenerate();return}
   el.selectedModelName.textContent=m.name;
-  el.selectedModelMeta.textContent=`${m.recommended?"Recomendado · ":""}Compatible · ${m.disk_gb?`${m.disk_gb} GB`:"local"}`;
+  el.selectedModelMeta.textContent=`${m.installed?"Instalado":"Sin instalar"} · ${m.recommended?"Recomendado · ":""}${m.disk_gb?`${m.disk_gb} GB`:"local"}`;
   el.selectedModelAvatar.innerHTML=`${m.avatar_url?`<img src="${esc(m.avatar_url)}" alt="">`:""}<span>${authorMark(m)}</span>`;
   installAvatarFallbacks(el.selectedModelAvatar);
   el.bottomMode.textContent=m.name;
+  renderModelInstallStatus();
   updateGenerate();
   updateHardwareHint();
 }
@@ -618,19 +698,27 @@ function renderCompatibleModels(){
   installAvatarFallbacks(el.compatibleModelList);
 }
 function modelRow(m,i,selectable){
+  const installState=modelInstallState(m);
   const meta=[
     m.family,
     m.disk_gb?`${m.disk_gb} GB`:null,
     m.license,
   ].filter(Boolean).join(" · ");
-  return `<div class="model-row ${state.model?.id===m.id?"selected":""}" style="--i:${i}">
+  const action=!m.compatible
+    ? `<span class="compat-badge adapter">Adaptador</span>`
+    : installState==="installed"
+      ? `<button class="model-row-action installed" type="button" disabled>${icons.check}<span>Instalado</span></button>`
+      : installState==="downloading"
+        ? `<button class="model-row-action" type="button" disabled><span class="spinner"></span><span>Instalando</span></button>`
+        : `<button class="model-row-action" type="button" data-install-model="${esc(m.id)}">${installState==="error"?"Reintentar":"Instalar"}</button>`;
+  return `<div class="model-row ${state.model?.id===m.id?"selected":""}" data-install-state="${esc(installState)}" style="--i:${i}">
     ${avatarHTML(m)}
     <button class="model-main" data-model="${esc(m.id)}" ${selectable&&m.compatible?"":"data-disabled='true'"}>
       <span class="model-title-line"><strong>${esc(m.name)}</strong>${m.recommended?`<em>Recomendado</em>`:""}</span>
       <small>${esc(meta||m.author||"Hugging Face")}</small>
       ${m.compatibility_note?`<p>${esc(m.compatibility_note)}</p>`:""}
     </button>
-    <span class="compat-badge ${m.compatible?"ok":"adapter"}">${m.compatible?"Compatible":"Adaptador"}</span>
+    ${action}
   </div>`;
 }
 function wireModelRows(root){
@@ -650,6 +738,94 @@ async function searchModels(){
       wireModelRows(el.modelSearchResults);
     }catch(e){el.modelSearchState.textContent="Sin conexión con Hugging Face. Los modelos compatibles locales siguen disponibles."}
   },300);
+}
+
+async function refreshModelsOnly(){
+  const selectedId=state.model?.id;
+  const models=await api("/api/models");
+  state.models=models;
+  state.model=models.compatible.find(model=>model.id===selectedId)
+    ||models.compatible.find(model=>model.id===models.recommended_id)
+    ||models.compatible[0]
+    ||null;
+  renderCompatibleModels();
+  updateModelUI();
+}
+function stopModelInstallPolling(){
+  clearInterval(state.modelInstallTimer);
+  state.modelInstallTimer=null;
+  state.modelInstallId=null;
+}
+async function pollModelInstall(modelId){
+  stopModelInstallPolling();
+  state.modelInstallId=modelId;
+  let checking=false;
+  const check=async()=>{
+    if(checking)return;
+    checking=true;
+    try{
+      const status=await api(`/api/models/install/status?model_id=${encodeURIComponent(modelId)}`);
+      applyModelInstallStatus(modelId,status);
+      renderCompatibleModels();
+      updateModelUI();
+      if(status.state==="installed"){
+        stopModelInstallPolling();
+        await refreshModelsOnly();
+        toast("Modelo instalado y listo para generar.","success");
+      }else if(status.state==="error"){
+        stopModelInstallPolling();
+        toast(status.message||"No se pudo instalar el modelo.","error");
+      }
+    }catch{
+      if(state.modelInstallId===modelId){
+        el.modelInstallMeta.textContent="Esperando al motor local para continuar la comprobación…";
+      }
+    }finally{checking=false}
+  };
+  await check();
+  if(state.modelInstallId===modelId)state.modelInstallTimer=setInterval(check,1200);
+}
+async function installModel(modelId){
+  const model=(state.models.compatible||[]).find(item=>item.id===modelId);
+  if(!model||!model.compatible)return toast("Este modelo necesita otro adaptador.","error");
+  if(model.installed)return toast("El modelo ya está instalado.","success");
+
+  applyModelInstallStatus(modelId,{
+    state:"downloading",
+    installed:false,
+    message:"Iniciando descarga desde Hugging Face.",
+    downloaded_bytes:model.downloaded_bytes||0,
+    expected_bytes:model.expected_bytes||Math.round(Number(model.disk_gb||0)*(1024**3))
+  });
+  renderCompatibleModels();
+  updateModelUI();
+
+  try{
+    const status=await api("/api/models/install",{
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({model_id:modelId})
+    });
+    applyModelInstallStatus(modelId,status);
+    renderCompatibleModels();
+    updateModelUI();
+    if(status.state==="installed"){
+      await refreshModelsOnly();
+      toast("El modelo ya estaba instalado y fue detectado.","success");
+      return;
+    }
+    await pollModelInstall(modelId);
+  }catch(error){
+    applyModelInstallStatus(modelId,{
+      state:"error",
+      installed:false,
+      message:error.message||"No se pudo iniciar la descarga.",
+      error:error.message
+    });
+    renderCompatibleModels();
+    updateModelUI();
+    toast(error.message||"No se pudo instalar el modelo.","error");
+  }
 }
 
 function voiceQualityClass(score){return score>=85?"excellent":score>=70?"good":score>=50?"fair":"poor"}
@@ -816,7 +992,11 @@ function estimateDuration(){
   el.duration.textContent=`≈ ${seconds} s`;el.duration.classList.toggle("target",seconds>=9&&seconds<=11);
 }
 function syncLabels(){el.speedValue.textContent=`${Number(el.speed.value).toFixed(2)}×`;el.pitchValue.textContent=`${Number(el.pitch.value).toFixed(1)} st`;el.musicVolumeValue.textContent=`${el.musicVolume.value}%`;estimateDuration()}
-function updateGenerate(){el.generate.disabled=!(state.voice&&selectedModel()?.compatible&&el.script.value.trim())||state.busy}
+function updateGenerate(){
+  const model=selectedModel();
+  el.generate.disabled=!(state.voice&&model?.compatible&&model.installed&&el.script.value.trim())||state.busy;
+  if(!state.busy)el.generateText.textContent=model&&!model.installed?"Instala el modelo":state.result?"Regenerar":"Generar";
+}
 function savePreferences(){
   try{
     localStorage.setItem("vsa-settings",JSON.stringify({
@@ -856,14 +1036,14 @@ function setBusy(on){
   if(on){
     el.strip.classList.add("visible");el.strip.classList.remove("success","error");el.generateIcon.innerHTML=`<span class="spinner"></span>`;el.generateText.textContent="Generando";
   }else{
-    el.generateIcon.innerHTML=icons.spark;el.generateText.textContent=state.result?"Regenerar":"Generar";
+    el.generateIcon.innerHTML=icons.spark;updateGenerate();
   }
 }
 function hideStrip(delay=1300){clearTimeout(hideStrip.t);hideStrip.t=setTimeout(()=>el.strip.classList.remove("visible","success","error"),delay)}
 function stageFor(st){
   const map={
     checking:["Comprobando hardware","Seleccionando el mejor modo para este modelo."],
-    loading_model:["Cargando modelo","La primera carga puede descargar varios GB y quedará en caché."],
+    loading_model:["Cargando modelo","Leyendo el modelo instalado desde este equipo."],
     preparing_voice:["Preparando referencia","Leyendo identidad vocal y contexto ICL."],
     generating:["Generando locución","Sintetizando la voz localmente."],
     postprocessing:["Ajustando audio","Aplicando velocidad, tono y realce local."],
@@ -877,6 +1057,7 @@ function pollStatus(){clearInterval(state.statusTimer);state.statusTimer=setInte
 
 async function generate(){
   if(!state.voice||!selectedModel()?.compatible||!el.script.value.trim())return;
+  if(!selectedModel()?.installed){toast("Instala el modelo seleccionado antes de generar.","error");return}
   stopPreview();setBusy(true);pollStatus();
   try{
     const result=await api("/api/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(settingsPayload())});
@@ -1055,6 +1236,24 @@ function updateHardwareSetup(hardware,recommended){
 function enginePackageFor(flavor){
   return state.engine.catalog?.manifest?.engines?.find(item=>item.flavor===flavor)||null;
 }
+function versionIsOlder(current,required){
+  const parse=value=>String(value||"0").split(".").map(part=>Number.parseInt(part,10)||0);
+  const left=parse(current),right=parse(required),length=Math.max(left.length,right.length);
+  for(let index=0;index<length;index++){
+    const a=left[index]||0,b=right[index]||0;
+    if(a!==b)return a<b;
+  }
+  return false;
+}
+function configureEngineIntro(mode="install"){
+  const updating=mode==="update";
+  el.setupIntroKicker.textContent=updating?"ACTUALIZACIÓN REQUERIDA":"PRIMER INICIO";
+  el.setupIntroTitle.textContent=updating?"Actualicemos el motor local.":"Preparamos el estudio por ti.";
+  el.setupIntroBody.textContent=updating
+    ? `La versión ${REQUIRED_ENGINE_VERSION} añade instalación y detección de modelos sin abrir terminales. Tus voces y modelos guardados se conservarán.`
+    : "Voice Studio AI descargará su motor de voz de forma segura. No necesitas instalar Python, PyTorch ni abrir una terminal.";
+  el.installEngineButton.textContent=updating?"Actualizar motor":"Preparar Voice Studio AI";
+}
 function selectEngineFlavor(flavor){
   if(state.engine.installing)return;
   if(!enginePackageFor(flavor))return;
@@ -1192,8 +1391,18 @@ async function refreshEngineStatus(){
   }
 }
 async function showFirstRunEngine(){
+  configureEngineIntro("install");
   openEngineSetup("engineIntroView",false);
   try{await loadEngineCatalog()}catch{}
+}
+async function showEngineUpdate(){
+  configureEngineIntro("update");
+  openEngineSetup("engineIntroView",false);
+  try{
+    await loadEngineCatalog();
+    const current=state.engine.status?.flavor;
+    if(current&&enginePackageFor(current))selectEngineFlavor(current);
+  }catch{}
 }
 async function showEngineManager(){
   const status=await refreshEngineStatus();
@@ -1203,6 +1412,7 @@ async function showEngineManager(){
     openEngineSetup("engineManageView",true);
     loadEngineCatalog({showErrors:false}).catch(()=>{});
   }else{
+    configureEngineIntro("install");
     openEngineSetup("engineIntroView",true);
     loadEngineCatalog().catch(()=>{});
   }
@@ -1273,6 +1483,14 @@ el.voiceList.onclick=e=>{
 };
 
 function handleModelListClick(e){
+  const installButton=e.target.closest("[data-install-model]");
+  if(installButton){
+    e.preventDefault();
+    e.stopPropagation();
+    installModel(installButton.dataset.installModel);
+    return;
+  }
+
   const button=e.target.closest("[data-model]");
   if(!button) return;
 
@@ -1290,6 +1508,10 @@ function handleModelListClick(e){
 }
 el.compatibleModelList.onclick=handleModelListClick;
 el.modelSearchResults.onclick=handleModelListClick;
+el.installSelectedModel.onclick=()=>{
+  const model=selectedModel();
+  if(model)installModel(model.id);
+};
 el.voiceSearch.oninput=()=>renderVoices(el.voiceSearch.value);el.modelSearch.oninput=searchModels;
 el.addVoice.onclick=()=>el.voiceFile.click();el.voiceFile.onchange=()=>{const f=el.voiceFile.files?.[0];if(f)prepareImport(f);el.voiceFile.value=""};
 el.voiceImportForm.onsubmit=async e=>{if(e.submitter?.value==="cancel")return;e.preventDefault();if(!state.pendingVoiceFile)return;el.confirmVoiceImport.disabled=true;try{await importVoice(state.pendingVoiceFile,el.importTranscript.value.trim());el.voiceImportDialog.close();state.pendingVoiceFile=null;toast("Voz importada y preparada.","success")}catch(err){toast(err.message,"error")}finally{el.confirmVoiceImport.disabled=false}};
@@ -1412,6 +1634,10 @@ async function boot(){
   const status=await refreshEngineStatus();
   if(!status?.installed){
     await showFirstRunEngine();
+    return;
+  }
+  if(versionIsOlder(status.version,REQUIRED_ENGINE_VERSION)){
+    await showEngineUpdate();
     return;
   }
   await launchWorkspace();

@@ -1,7 +1,7 @@
 param(
     [ValidateSet("cpu","nvidia")]
     [string]$Flavor = "nvidia",
-    [string]$EngineVersion = "1.0.1"
+    [string]$EngineVersion = "1.0.2"
 )
 
 $ErrorActionPreference = "Stop"

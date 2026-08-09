@@ -38,7 +38,7 @@ aplicación y NO se borran al reparar/desinstalar el engine.
 
 La app consulta:
 
-https://github.com/leo10m2010/Voice-Studio-AI/releases/download/engine-v1.0.1/engine-manifest.json
+https://github.com/leo10m2010/Voice-Studio-AI/releases/download/engine-v1.0.2/engine-manifest.json
 
 Puede sobrescribirse en desarrollo con:
 
@@ -51,7 +51,7 @@ Puede sobrescribirse en desarrollo con:
 Actions → `03 - Publicar motores CPU y NVIDIA`
 
 Ese workflow:
-1. crea/usa Release `engine-v1.0.1`;
+1. crea/usa Release `engine-v1.0.2`;
 2. construye CPU y NVIDIA por separado;
 3. divide cada runtime en ZIPs pequeños;
 4. sube las partes;

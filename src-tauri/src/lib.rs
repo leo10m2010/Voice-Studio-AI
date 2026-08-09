@@ -23,7 +23,7 @@ use zip::ZipArchive;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
-const ENGINE_MANIFEST_URL: &str = "https://github.com/leo10m2010/Voice-Studio-AI/releases/download/engine-v1.0.1/engine-manifest.json";
+const ENGINE_MANIFEST_URL: &str = "https://github.com/leo10m2010/Voice-Studio-AI/releases/download/engine-v1.0.2/engine-manifest.json";
 const ENGINE_PORT: &str = "8765";
 
 struct EngineProcess(Mutex<Option<Child>>);
@@ -998,12 +998,12 @@ mod tests {
     fn valid_manifest() -> EngineManifest {
         EngineManifest {
             schema: 1,
-            version: "1.0.1".into(),
+            version: "1.0.2".into(),
             published_at: None,
             engines: vec![EnginePackage {
                 flavor: "cpu".into(),
                 label: "Motor CPU".into(),
-                version: "1.0.1".into(),
+                version: "1.0.2".into(),
                 download_bytes: 10,
                 installed_bytes: 20,
                 description: String::new(),

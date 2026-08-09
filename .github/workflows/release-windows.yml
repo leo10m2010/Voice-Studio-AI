@@ -77,7 +77,9 @@ jobs:
             visualmente el motor local CPU/NVIDIA. Python, PyTorch y Qwen no se
             instalan globalmente en Windows.
 
-            Los modelos de voz se descargan bajo demanda y quedan en caché local.
+            Los modelos compatibles ya presentes se detectan automáticamente.
+            Los que falten pueden instalarse desde la interfaz y quedan en la
+            caché local para usarlos sin volver a descargarlos.
           generateReleaseNotes: true
           releaseDraft: false
           prerelease: false

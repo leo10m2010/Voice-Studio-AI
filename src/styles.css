@@ -26,6 +26,7 @@ button,input,textarea,select{font:inherit;color:inherit}button{cursor:pointer}sv
 
 .pressable{transition:transform 100ms ease-out,background var(--fast),border-color var(--fast),color var(--fast),opacity var(--fast)}
 .pressable.is-pressed,.pressable:active{transform:scale(.97)}
+.pressable:focus-visible,.model-row-action:focus-visible{outline:2px solid color-mix(in srgb,var(--accent) 72%,transparent);outline-offset:2px}
 .icon-button{width:32px;height:32px;display:grid;place-items:center;padding:0;border:1px solid var(--line);border-radius:9px;background:var(--surface)}.icon-button:hover{background:var(--surface-2);border-color:var(--line-strong)}.icon-button.small{width:29px;height:29px}
 
 .main-grid{flex:1;min-height:0;display:grid;grid-template-columns:minmax(0,1fr) clamp(430px,24vw,510px)}
@@ -157,6 +158,17 @@ dialog{width:min(540px,calc(100vw - 40px));padding:0;border:1px solid var(--line
 }
 
 .repair-library{margin:7px 0 0;padding:0;border:0;background:transparent;color:var(--accent);font-size:.5rem;font-weight:650;text-align:left}.repair-library:hover{text-decoration:underline}.repair-library:disabled{opacity:.45;cursor:wait}
+
+.model-setting-block{margin-bottom:8px}
+.model-install-card{display:grid;grid-template-columns:36px minmax(0,1fr) auto;align-items:center;gap:10px;margin:0 0 10px;padding:10px;border:1px solid var(--line);border-radius:12px;background:var(--surface-2);transition:border-color var(--fast),background var(--fast)}
+.model-install-icon{display:grid;place-items:center;width:36px;height:36px;border-radius:10px;background:var(--surface);color:var(--muted)}.model-install-icon svg{width:17px;height:17px}
+.model-install-copy{display:flex;min-width:0;flex-direction:column}.model-install-copy small{color:var(--faint);font-size:.43rem;font-weight:800;letter-spacing:.09em}.model-install-copy strong{margin-top:2px;overflow:hidden;font-size:.58rem;text-overflow:ellipsis;white-space:nowrap}.model-install-copy>span{display:-webkit-box;margin-top:2px;overflow:hidden;color:var(--muted);font-size:.48rem;line-height:1.35;overflow-wrap:anywhere;-webkit-box-orient:vertical;-webkit-line-clamp:2}
+.model-install-action,.model-row-action{display:inline-flex;align-items:center;justify-content:center;gap:5px;border:1px solid var(--line-strong);border-radius:8px;background:var(--surface);color:var(--text);font-weight:720;white-space:nowrap}.model-install-action{min-width:94px;height:30px;padding:0 9px;font-size:.47rem}.model-install-action:hover:not(:disabled),.model-row-action:hover:not(:disabled){border-color:var(--accent);color:var(--accent-strong)}.model-install-action:disabled,.model-row-action:disabled{cursor:default}
+.model-install-action svg,.model-row-action svg{width:13px;height:13px}.model-install-action .spinner,.model-row-action .spinner{width:12px;height:12px;border-color:color-mix(in srgb,currentColor 25%,transparent);border-top-color:currentColor}
+.model-install-card[data-state="installed"]{border-color:color-mix(in srgb,var(--accent) 34%,var(--line));background:color-mix(in srgb,var(--accent) 6%,var(--surface-2))}.model-install-card[data-state="installed"] .model-install-icon{color:var(--accent)}.model-install-action.installed{border-color:transparent;background:var(--accent-soft);color:var(--accent-strong);opacity:1}
+.model-install-card[data-state="downloading"]{border-color:color-mix(in srgb,var(--accent) 48%,var(--line))}.model-install-card[data-state="error"]{border-color:color-mix(in srgb,var(--danger) 38%,var(--line))}.model-install-card[data-state="error"] .model-install-icon{color:var(--danger)}
+.model-install-card+.engine-mini-card{margin-top:0}
+.model-row-action{min-width:68px;height:27px;padding:0 7px;font-size:.42rem}.model-row-action.installed{border-color:transparent;background:var(--accent-soft);color:var(--accent-strong);opacity:1}
 
 
 /* =========================================================

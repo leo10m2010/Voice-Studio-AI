@@ -679,3 +679,16 @@ Fixes `E0505` in the Engine Manager catalog by making
 - supports reproducible engine releases from `engine-v*` tags;
 - moves the application to `v0.7.3` because the stale `v0.7.2` tag points to
   an older `0.7.1` manifest.
+
+
+---
+
+# v0.7.4 — Silent Windows launch and model installer
+
+- builds the release executable with the Windows GUI subsystem so no terminal
+  opens beside the application;
+- detects compatible models already present in the private Hugging Face cache;
+- installs model snapshots explicitly in the background with retryable state;
+- shows `Sin instalar`, `Instalando`, `Instalado` and recovery states in the UI;
+- requires engine `1.0.2` and guides older installations through the visual
+  engine updater before opening the workspace.

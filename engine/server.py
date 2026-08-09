@@ -27,6 +27,7 @@ from pydantic import BaseModel
 
 from audio_mix import mix_voice_with_music
 from audio_ingest import transcode_music_to_wav, validate_canonical_music
+from model_install import ModelInstallRegistry
 
 DEFAULT_MODEL_ID = "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
 
@@ -124,6 +125,8 @@ for directory in (
 os.environ["HF_HOME"] = str(HF_HOME)
 os.environ["HUGGINGFACE_HUB_CACHE"] = str(HF_HOME / "hub")
 
+MODEL_INSTALLER = ModelInstallRegistry(HF_HOME, SUPPORTED_MODELS)
+
 ALLOWED_AUDIO = {".wav", ".mp3", ".flac", ".ogg"}
 MAX_UPLOAD_MB = 80
 FETCH_REMOTE_AVATARS = os.environ.get("QWEN_STUDIO_FETCH_AVATARS", "0").lower() in {
@@ -201,6 +204,7 @@ def huggingface_author_avatar(author: str) -> Optional[str]:
 
 def supported_model_payload(model_id: str) -> dict:
     info = dict(SUPPORTED_MODELS[model_id])
+    install = MODEL_INSTALLER.get_state(model_id)
     info.update(
         {
             "id": model_id,
@@ -208,6 +212,12 @@ def supported_model_payload(model_id: str) -> dict:
             "compatibility_note": "Compatible con el motor Qwen integrado.",
             "avatar_url": huggingface_author_avatar(info.get("author", "")),
             "hub_url": f"https://huggingface.co/{model_id}",
+            "installed": install["installed"],
+            "install_state": install["state"],
+            "install_message": install["message"],
+            "downloaded_bytes": install["downloaded_bytes"],
+            "expected_bytes": install["expected_bytes"],
+            "install_error": install["error"],
         }
     )
     return info
@@ -906,6 +916,13 @@ class ModelManager:
                 "un adaptador ejecutable en Voice Studio AI."
             )
 
+        snapshot = MODEL_INSTALLER.cached_snapshot(model_id)
+        if snapshot is None:
+            raise RuntimeError(
+                "El modelo seleccionado no está instalado. Abre Modelos y pulsa "
+                "'Instalar modelo' antes de generar."
+            )
+
         with self.load_lock:
             target = self.choose_backend(requested, model_id)
 
@@ -940,7 +957,7 @@ class ModelManager:
 
             try:
                 model = Qwen3TTSModel.from_pretrained(
-                    model_id,
+                    str(snapshot),
                     device_map=device_map,
                     dtype=dtype,
                     attn_implementation="sdpa",
@@ -1124,6 +1141,10 @@ class GenerateRequest(BaseModel):
     music_volume: float = 0.18
 
 
+class ModelInstallRequest(BaseModel):
+    model_id: str
+
+
 class TranscriptUpdate(BaseModel):
     transcript: str = ""
 
@@ -1213,6 +1234,26 @@ def models():
         "compatible": direct,
         "discovery": discovery,
     }
+
+
+@app.post("/api/models/install", status_code=202)
+def install_model(request: ModelInstallRequest):
+    if request.model_id not in SUPPORTED_MODELS:
+        raise HTTPException(
+            status_code=400,
+            detail="Este modelo todavía no tiene un adaptador instalable en Voice Studio AI.",
+        )
+    try:
+        return MODEL_INSTALLER.start(request.model_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.get("/api/models/install/status")
+def model_install_status(model_id: str):
+    if model_id not in SUPPORTED_MODELS:
+        raise HTTPException(status_code=404, detail="Modelo compatible no encontrado.")
+    return MODEL_INSTALLER.get_state(model_id)
 
 
 @app.get("/api/models/search")
