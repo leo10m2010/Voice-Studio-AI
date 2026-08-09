@@ -1,12 +1,15 @@
 name: "03 - Publicar motores CPU y NVIDIA"
 
 on:
+  push:
+    tags:
+      - "engine-v*"
   workflow_dispatch:
     inputs:
       engine_version:
         description: "Version del motor"
         required: true
-        default: "1.0.0"
+        default: "1.0.1"
       flavor:
         description: "Motor a construir"
         required: true
@@ -23,20 +26,59 @@ permissions:
 jobs:
   prepare-release:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      flavor: ${{ steps.meta.outputs.flavor }}
+      tag: ${{ steps.meta.outputs.tag }}
     steps:
+      - name: Resolver version y sabores
+        id: meta
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_VERSION: ${{ inputs.engine_version }}
+          INPUT_FLAVOR: ${{ inputs.flavor }}
+        run: |
+          if [[ "$EVENT_NAME" == "push" ]]; then
+            VERSION="${REF_NAME#engine-v}"
+            FLAVOR="both"
+            if [[ "engine-v$VERSION" != "$REF_NAME" ]]; then
+              echo "Tag de motor invalido: $REF_NAME" >&2
+              exit 1
+            fi
+          else
+            VERSION="$INPUT_VERSION"
+            FLAVOR="$INPUT_FLAVOR"
+          fi
+
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Version de motor invalida: $VERSION" >&2
+            exit 1
+          fi
+          if [[ "$FLAVOR" != "both" && "$FLAVOR" != "cpu" && "$FLAVOR" != "nvidia" ]]; then
+            echo "Flavor invalido: $FLAVOR" >&2
+            exit 1
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "flavor=$FLAVOR" >> "$GITHUB_OUTPUT"
+          echo "tag=engine-v$VERSION" >> "$GITHUB_OUTPUT"
+
       - name: Preparar Release del motor
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VERSION: ${{ inputs.engine_version }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          TARGET_SHA: ${{ github.sha }}
         run: |
-          TAG="engine-v$VERSION"
           if ! gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
-            gh release create "$TAG" --repo "${{ github.repository }}" --title "Voice Engine v$VERSION" --notes "Runtime descargable de Voice Studio AI. No contiene modelos de voz."
+            gh release create "$TAG" --repo "${{ github.repository }}" --target "$TARGET_SHA" --title "Voice Engine v$VERSION" --notes "Runtime descargable de Voice Studio AI. No contiene modelos de voz."
           fi
 
   build-cpu:
     needs: prepare-release
-    if: ${{ inputs.flavor == 'both' || inputs.flavor == 'cpu' }}
+    if: ${{ needs.prepare-release.outputs.flavor == 'both' || needs.prepare-release.outputs.flavor == 'cpu' }}
     runs-on: windows-latest
     timeout-minutes: 120
     steps:
@@ -46,24 +88,28 @@ jobs:
           python-version: "3.12"
       - name: Construir motor CPU
         shell: pwsh
-        run: powershell -ExecutionPolicy Bypass -File .\scripts\build-engine-release.ps1 -Flavor cpu -EngineVersion "${{ inputs.engine_version }}"
+        run: powershell -ExecutionPolicy Bypass -File .\scripts\build-engine-release.ps1 -Flavor cpu -EngineVersion "${{ needs.prepare-release.outputs.version }}"
       - name: Subir partes CPU
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: engine-v${{ inputs.engine_version }}
+          TAG: ${{ needs.prepare-release.outputs.tag }}
         run: |
-          Get-ChildItem .\engine-release\voice-engine-cpu-*.zip | ForEach-Object {
-            gh release upload "$env:TAG" $_.FullName --repo "${{ github.repository }}" --clobber
+          $assets = @(Get-ChildItem .\engine-release\voice-engine-cpu-*.zip -ErrorAction SilentlyContinue)
+          if ($assets.Count -eq 0) { throw "No se genero ninguna parte CPU." }
+          foreach ($asset in $assets) {
+            gh release upload "$env:TAG" $asset.FullName --repo "${{ github.repository }}" --clobber
+            if ($LASTEXITCODE -ne 0) { throw "No se pudo subir $($asset.Name)." }
           }
       - uses: actions/upload-artifact@v6
         with:
           name: engine-fragment-cpu
           path: engine-release/engine-cpu.json
+          if-no-files-found: error
 
   build-nvidia:
     needs: prepare-release
-    if: ${{ inputs.flavor == 'both' || inputs.flavor == 'nvidia' }}
+    if: ${{ needs.prepare-release.outputs.flavor == 'both' || needs.prepare-release.outputs.flavor == 'nvidia' }}
     runs-on: windows-latest
     timeout-minutes: 150
     steps:
@@ -73,24 +119,32 @@ jobs:
           python-version: "3.12"
       - name: Construir motor NVIDIA
         shell: pwsh
-        run: powershell -ExecutionPolicy Bypass -File .\scripts\build-engine-release.ps1 -Flavor nvidia -EngineVersion "${{ inputs.engine_version }}"
+        run: powershell -ExecutionPolicy Bypass -File .\scripts\build-engine-release.ps1 -Flavor nvidia -EngineVersion "${{ needs.prepare-release.outputs.version }}"
       - name: Subir partes NVIDIA
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: engine-v${{ inputs.engine_version }}
+          TAG: ${{ needs.prepare-release.outputs.tag }}
         run: |
-          Get-ChildItem .\engine-release\voice-engine-nvidia-*.zip | ForEach-Object {
-            gh release upload "$env:TAG" $_.FullName --repo "${{ github.repository }}" --clobber
+          $assets = @(Get-ChildItem .\engine-release\voice-engine-nvidia-*.zip -ErrorAction SilentlyContinue)
+          if ($assets.Count -eq 0) { throw "No se genero ninguna parte NVIDIA." }
+          foreach ($asset in $assets) {
+            gh release upload "$env:TAG" $asset.FullName --repo "${{ github.repository }}" --clobber
+            if ($LASTEXITCODE -ne 0) { throw "No se pudo subir $($asset.Name)." }
           }
       - uses: actions/upload-artifact@v6
         with:
           name: engine-fragment-nvidia
           path: engine-release/engine-nvidia.json
+          if-no-files-found: error
 
   publish-manifest:
     needs: [prepare-release, build-cpu, build-nvidia]
-    if: always() && needs.prepare-release.result == 'success'
+    if: >-
+      ${{ always()
+          && needs.prepare-release.result == 'success'
+          && (needs.prepare-release.outputs.flavor == 'nvidia' || needs.build-cpu.result == 'success')
+          && (needs.prepare-release.outputs.flavor == 'cpu' || needs.build-nvidia.result == 'success') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v6
@@ -98,30 +152,67 @@ jobs:
           pattern: engine-fragment-*
           path: fragments
           merge-multiple: true
-      - name: Crear manifest final
+      - name: Crear y validar manifest final
         env:
-          VERSION: ${{ inputs.engine_version }}
+          VERSION: ${{ needs.prepare-release.outputs.version }}
+          FLAVOR: ${{ needs.prepare-release.outputs.flavor }}
         run: |
           python - <<'PY'
-          import json, glob, os
+          import glob
+          import json
+          import os
           from datetime import datetime, timezone
-          engines=[]
+
+          engines = []
           for path in glob.glob("fragments/engine-*.json"):
-              with open(path, encoding="utf-8") as f:
-                  engines.append(json.load(f))
-          if not engines:
-              raise SystemExit("No se generó ningún motor.")
-          manifest={
-              "schema":1,
-              "version":os.environ["VERSION"],
-              "published_at":datetime.now(timezone.utc).isoformat(),
-              "engines":sorted(engines,key=lambda x:x["flavor"])
+              with open(path, encoding="utf-8") as source:
+                  engines.append(json.load(source))
+
+          expected = {"cpu", "nvidia"} if os.environ["FLAVOR"] == "both" else {os.environ["FLAVOR"]}
+          actual = {engine.get("flavor") for engine in engines}
+          if actual != expected or len(engines) != len(expected):
+              raise SystemExit(f"Motores incompletos: esperados={sorted(expected)}, recibidos={sorted(actual)}")
+
+          for engine in engines:
+              parts = engine.get("parts") or []
+              if not parts:
+                  raise SystemExit(f"{engine['flavor']} no contiene partes")
+              if engine.get("version") != os.environ["VERSION"]:
+                  raise SystemExit(f"Version incorrecta en {engine['flavor']}")
+              if engine.get("download_bytes") != sum(part.get("bytes", 0) for part in parts):
+                  raise SystemExit(f"Tamano inconsistente en {engine['flavor']}")
+
+          manifest = {
+              "schema": 1,
+              "version": os.environ["VERSION"],
+              "published_at": datetime.now(timezone.utc).isoformat(),
+              "engines": sorted(engines, key=lambda item: item["flavor"]),
           }
-          with open("engine-manifest.json","w",encoding="utf-8") as f:
-              json.dump(manifest,f,ensure_ascii=False,indent=2)
+          with open("engine-manifest.json", "w", encoding="utf-8") as output:
+              json.dump(manifest, output, ensure_ascii=False, indent=2)
           PY
       - name: Publicar manifest
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: engine-v${{ inputs.engine_version }}
+          TAG: ${{ needs.prepare-release.outputs.tag }}
         run: gh release upload "$TAG" engine-manifest.json --repo "${{ github.repository }}" --clobber
+      - name: Verificar assets publicados
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare-release.outputs.tag }}
+          FLAVOR: ${{ needs.prepare-release.outputs.flavor }}
+        run: |
+          gh release view "$TAG" --repo "${{ github.repository }}" --json assets > release.json
+          python - <<'PY'
+          import json
+          import os
+
+          assets = {item["name"] for item in json.load(open("release.json", encoding="utf-8"))["assets"]}
+          if "engine-manifest.json" not in assets:
+              raise SystemExit("Falta engine-manifest.json en la Release")
+          expected = {"cpu", "nvidia"} if os.environ["FLAVOR"] == "both" else {os.environ["FLAVOR"]}
+          for flavor in expected:
+              prefix = f"voice-engine-{flavor}-"
+              if not any(name.startswith(prefix) and name.endswith(".zip") for name in assets):
+                  raise SystemExit(f"Faltan partes publicadas para {flavor}")
+          PY

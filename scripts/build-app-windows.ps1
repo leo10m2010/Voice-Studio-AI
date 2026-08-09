@@ -23,11 +23,17 @@ Need-Command "rustc" "Instala Rust desde rustup.rs."
 
 Write-Host ""
 Write-Host "1/3 Dependencias frontend..."
-npm install
+npm ci
+if ($LASTEXITCODE -ne 0) {
+    throw "NPM no pudo instalar las dependencias bloqueadas por package-lock.json."
+}
 
 Write-Host ""
 Write-Host "2/3 Cargo check..."
-cargo check --manifest-path .\src-tauri\Cargo.toml
+cargo check --locked --manifest-path .\src-tauri\Cargo.toml
+if ($LASTEXITCODE -ne 0) {
+    throw "Cargo check fallo; revisa Cargo.toml y Cargo.lock."
+}
 
 Write-Host ""
 Write-Host "3/3 Tauri + NSIS..."

@@ -6,6 +6,7 @@ on:
       - "**"
     tags-ignore:
       - "v*"
+      - "engine-v*"
   pull_request:
   workflow_dispatch:
 
@@ -57,7 +58,7 @@ jobs:
 
       - name: Instalar dependencias frontend
         shell: pwsh
-        run: npm install
+        run: npm ci
 
       - name: Comprobar versiones sincronizadas
         shell: pwsh
@@ -73,6 +74,7 @@ jobs:
           python -c "from pathlib import Path; p=Path('engine/server.py'); compile(p.read_text(encoding='utf-8'), str(p), 'exec'); print('server.py OK')"
           python -c "from pathlib import Path; p=Path('engine/audio_mix.py'); compile(p.read_text(encoding='utf-8'), str(p), 'exec'); print('audio_mix.py OK')"
           python -c "from pathlib import Path; p=Path('engine/audio_ingest.py'); compile(p.read_text(encoding='utf-8'), str(p), 'exec'); print('audio_ingest.py OK')"
+          python -m py_compile .\scripts\package_engine_assets.py
 
       - name: Verificar ownership de engine_catalog
         shell: pwsh
@@ -90,7 +92,11 @@ jobs:
 
       - name: Cargo check Tauri
         shell: pwsh
-        run: cargo check --manifest-path .\src-tauri\Cargo.toml
+        run: cargo check --locked --manifest-path .\src-tauri\Cargo.toml
+
+      - name: Pruebas Rust del instalador
+        shell: pwsh
+        run: cargo test --locked --manifest-path .\src-tauri\Cargo.toml
 
       - name: Build frontend
         shell: pwsh

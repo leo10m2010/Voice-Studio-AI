@@ -35,7 +35,7 @@ if (!existsSync(viteEntry)) {
   console.error("");
   console.error("No encuentro Vite en node_modules.");
   console.error("Ejecuta primero:");
-  console.error("  npm install");
+  console.error("  npm ci");
   console.error("");
   process.exit(1);
 }

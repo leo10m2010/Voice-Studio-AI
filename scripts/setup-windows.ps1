@@ -35,6 +35,10 @@ if (-not $pythonCommand) {
     exit 1
 }
 
+if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
+    throw "Falta npm. Instala Node.js y vuelve a ejecutar este archivo."
+}
+
 if (Test-Path ".venv\Scripts\python.exe") {
     $existingPy = (Resolve-Path ".venv\Scripts\python.exe").Path
     $venvHealthy = $true
@@ -58,6 +62,7 @@ if (-not (Test-Path ".venv\Scripts\python.exe")) {
     } else {
         & python -m venv .venv
     }
+    if ($LASTEXITCODE -ne 0) { throw "No se pudo crear el entorno virtual .venv." }
 }
 
 $py = Resolve-Path ".venv\Scripts\python.exe"
@@ -65,6 +70,7 @@ $pipArgs = @("-m", "pip")
 
 Write-Host "Actualizando pip..."
 & $py @pipArgs install --upgrade pip setuptools wheel
+if ($LASTEXITCODE -ne 0) { throw "No se pudo actualizar pip, setuptools y wheel." }
 
 $hasNvidia = $false
 try {
@@ -86,20 +92,22 @@ if ($hasNvidia) {
         torch==2.10.0 torchaudio==2.10.0 `
         --index-url https://download.pytorch.org/whl/cpu
 }
+if ($LASTEXITCODE -ne 0) { throw "No se pudo instalar PyTorch para el hardware detectado." }
 
 Write-Host ""
 Write-Host "Instalando Qwen3-TTS y servidor local..."
 & $py @pipArgs install -r engine\requirements.txt
+if ($LASTEXITCODE -ne 0) { throw "No se pudieron instalar Qwen3-TTS y las dependencias del servidor." }
 
 Write-Host ""
 Write-Host "Comprobando PyTorch..."
 & $py -c "import torch; print('Torch:', torch.__version__); print('CUDA:', torch.cuda.is_available()); print('GPU:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU')"
+if ($LASTEXITCODE -ne 0) { throw "PyTorch se instalo, pero no pudo importarse." }
 
-if (-not (Test-Path "node_modules")) {
-    Write-Host ""
-    Write-Host "Instalando dependencias de la interfaz..."
-    npm install
-}
+Write-Host ""
+Write-Host "Instalando dependencias bloqueadas de la interfaz..."
+npm ci
+if ($LASTEXITCODE -ne 0) { throw "NPM no pudo restaurar package-lock.json." }
 
 Write-Host ""
 Write-Host "Preparacion terminada." -ForegroundColor Green

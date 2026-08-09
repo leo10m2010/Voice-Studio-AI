@@ -664,3 +664,18 @@ See `ENGINE_MANAGER.md`.
 
 Fixes `E0505` in the Engine Manager catalog by making
 `recommended_flavor` an owned `String` before moving the manifest.
+
+
+---
+
+# v0.7.3 — Installer and release recovery
+
+- publishes a rebuilt `engine-v1.0.1` with the Qwen3-TTS 12 Hz tokenizer;
+- rejects a packaged engine before publication when its exact Qwen imports fail;
+- keeps large engine downloads resumable without a short total timeout;
+- validates manifest paths, sizes, hashes and partial download ranges;
+- records the last installation failure in `engine/last-install-error.log`;
+- uses `npm ci` and `cargo --locked` in validation/release workflows;
+- supports reproducible engine releases from `engine-v*` tags;
+- moves the application to `v0.7.3` because the stale `v0.7.2` tag points to
+  an older `0.7.1` manifest.

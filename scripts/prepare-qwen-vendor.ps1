@@ -14,15 +14,20 @@ if (Test-Path $vendorRoot) {
 }
 New-Item -ItemType Directory -Force -Path $vendorRoot | Out-Null
 
-$qwenSource = & $PythonExe -c "import pathlib, qwen_tts; print(pathlib.Path(qwen_tts.__file__).resolve().parent)"
-if (-not $qwenSource) {
+$qwenProbe = @(& $PythonExe -c "import importlib.util; spec=importlib.util.find_spec('qwen_tts'); assert spec and spec.submodule_search_locations, 'qwen_tts no esta instalado'; print(next(iter(spec.submodule_search_locations)))")
+if ($LASTEXITCODE -ne 0) {
     throw "No se pudo localizar qwen_tts en el entorno Python."
 }
+$qwenLines = @($qwenProbe | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+if ($qwenLines.Count -ne 1) {
+    throw "Python devolvio una ruta ambigua para qwen_tts: $($qwenLines -join '; ')"
+}
 
-$qwenSource = $qwenSource.Trim()
-if (-not (Test-Path $qwenSource)) {
+$qwenSource = $qwenLines[0]
+if (-not (Test-Path -LiteralPath $qwenSource -PathType Container)) {
     throw "No existe la carpeta qwen_tts detectada: $qwenSource"
 }
+$qwenSource = (Resolve-Path -LiteralPath $qwenSource).Path
 
 Write-Host "Preparando qwen_tts 12Hz-only para PyInstaller..." -ForegroundColor Cyan
 Write-Host "Origen: $qwenSource" -ForegroundColor DarkGray

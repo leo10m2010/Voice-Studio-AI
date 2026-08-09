@@ -2,7 +2,7 @@ param(
     [ValidateSet("cpu","nvidia")]
     [string]$Flavor = "nvidia",
     [string]$EngineDir = "engine-dist\qwen-engine",
-    [string]$Version = "1.0.0",
+    [string]$Version = "1.0.1",
     [string]$OutputDir = "engine-release"
 )
 
@@ -17,6 +17,9 @@ python .\scripts\package_engine_assets.py `
     --version "$Version" `
     --out "$OutputDir" `
     --base-url "$baseUrl"
+if ($LASTEXITCODE -ne 0) {
+    throw "No se pudieron crear los assets del motor $Flavor v$Version."
+}
 
 Write-Host ""
 Write-Host "Assets listos en $OutputDir" -ForegroundColor Green

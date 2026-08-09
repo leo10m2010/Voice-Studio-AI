@@ -19,13 +19,15 @@ Write-Host "Voice Studio AI - Motor Windows LEAN" -ForegroundColor Cyan
 Write-Host "Python: $py" -ForegroundColor DarkGray
 Write-Host "Salida: $engineFolder" -ForegroundColor DarkGray
 
-& $py -m pip install --upgrade pyinstaller
+& $py -m pip install --upgrade pyinstaller==6.22.0 pyinstaller-hooks-contrib==2026.6
+if ($LASTEXITCODE -ne 0) { throw "No se pudo instalar PyInstaller." }
 
 if (Test-Path "engine\build") { Remove-Item "engine\build" -Recurse -Force }
 if (Test-Path $engineFolder) { Remove-Item $engineFolder -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $output | Out-Null
 
 powershell -ExecutionPolicy Bypass -File ".\scripts\prepare-qwen-vendor.ps1" -PythonExe $py | Out-Host
+if ($LASTEXITCODE -ne 0) { throw "No se pudo preparar el vendor de Qwen3-TTS 12Hz." }
 $vendorRoot = Join-Path (Resolve-Path ".\engine") "_vendor_slim"
 
 $oldPythonPath = $env:PYTHONPATH
@@ -72,6 +74,9 @@ try {
         --exclude-module notebook `
         --exclude-module cv2 `
         engine\server.py
+    if ($LASTEXITCODE -ne 0) {
+        throw "PyInstaller no pudo compilar qwen-engine.exe."
+    }
 }
 finally {
     $env:PYTHONPATH = $oldPythonPath
@@ -79,24 +84,6 @@ finally {
 
 $engineExe = Join-Path $engineFolder "qwen-engine.exe"
 if (-not (Test-Path $engineExe)) { throw "PyInstaller no generó $engineExe" }
-
-$packagedQwen = Join-Path $engineFolder "_internal\qwen_tts"
-$packagedRequired = @(
-    "__init__.py",
-    "inference\qwen3_tts_model.py",
-    "inference\qwen3_tts_tokenizer.py",
-    "core\tokenizer_12hz\__init__.py",
-    "core\tokenizer_12hz\configuration_qwen3_tts_tokenizer_v2.py",
-    "core\tokenizer_12hz\modeling_qwen3_tts_tokenizer_v2.py"
-)
-foreach ($relative in $packagedRequired) {
-    if (-not (Test-Path (Join-Path $packagedQwen $relative))) {
-        throw "El paquete PyInstaller no contiene el archivo Qwen requerido: $relative"
-    }
-}
-if (Test-Path (Join-Path $packagedQwen "core\tokenizer_25hz")) {
-    throw "El paquete PyInstaller contiene tokenizer_25hz; se publicaría un runtime incorrecto."
-}
 
 Write-Host ""
 Write-Host "Self-test del motor..."

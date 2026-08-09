@@ -12,7 +12,7 @@ use std::{
 
 use reqwest::{
     blocking::Client,
-    header::RANGE,
+    header::{CONTENT_RANGE, RANGE},
     StatusCode,
 };
 use serde::{Deserialize, Serialize};
@@ -23,7 +23,7 @@ use zip::ZipArchive;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
-const ENGINE_MANIFEST_URL: &str = "https://github.com/leo10m2010/Voice-Studio-AI/releases/download/engine-v1.0.0/engine-manifest.json";
+const ENGINE_MANIFEST_URL: &str = "https://github.com/leo10m2010/Voice-Studio-AI/releases/download/engine-v1.0.1/engine-manifest.json";
 const ENGINE_PORT: &str = "8765";
 
 struct EngineProcess(Mutex<Option<Child>>);
@@ -120,6 +120,7 @@ struct EngineProgress {
     flavor: String,
 }
 
+#[cfg(debug_assertions)]
 fn debug_project_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -134,10 +135,12 @@ fn app_engine_root(app: &AppHandle) -> Result<PathBuf, String> {
         .map_err(|error| error.to_string())
 }
 
+#[cfg(not(debug_assertions))]
 fn runtime_dir(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(app_engine_root(app)?.join("runtime"))
 }
 
+#[cfg(not(debug_assertions))]
 fn runtime_executable(app: &AppHandle) -> Result<PathBuf, String> {
     let name = if cfg!(windows) {
         "qwen-engine.exe"
@@ -147,6 +150,7 @@ fn runtime_executable(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(runtime_dir(app)?.join(name))
 }
 
+#[cfg(not(debug_assertions))]
 fn install_record_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(runtime_dir(app)?.join("install.json"))
 }
@@ -172,6 +176,7 @@ fn directory_size(path: &Path) -> u64 {
     total
 }
 
+#[cfg(not(debug_assertions))]
 fn read_install_record(app: &AppHandle) -> Option<EngineInstallRecord> {
     let path = install_record_path(app).ok()?;
     let content = fs::read_to_string(path).ok()?;
@@ -221,7 +226,11 @@ fn engine_status_value(_app: &AppHandle, process: &EngineProcess) -> Result<Engi
             flavor: record.as_ref().map(|x| x.flavor.clone()),
             label: record.as_ref().map(|x| x.label.clone()),
             path: runtime.display().to_string(),
-            installed_bytes: if runtime.exists() { directory_size(&runtime) } else { 0 },
+            installed_bytes: if runtime.exists() {
+                directory_size(&runtime)
+            } else {
+                0
+            },
             executable_exists: executable.exists(),
             running: engine_running(process),
         })
@@ -257,9 +266,15 @@ fn detect_hardware_value() -> HardwareInfo {
                 let text = String::from_utf8_lossy(&output.stdout);
                 if let Some(line) = text.lines().next() {
                     let fields: Vec<_> = line.split(',').map(|value| value.trim()).collect();
-                    let gpu_name = fields.first().filter(|x| !x.is_empty()).map(|x| x.to_string());
+                    let gpu_name = fields
+                        .first()
+                        .filter(|x| !x.is_empty())
+                        .map(|x| x.to_string());
                     let vram_mb = fields.get(1).and_then(|x| x.parse::<f64>().ok());
-                    let driver = fields.get(2).filter(|x| !x.is_empty()).map(|x| x.to_string());
+                    let driver = fields
+                        .get(2)
+                        .filter(|x| !x.is_empty())
+                        .map(|x| x.to_string());
                     let vram_gb = vram_mb.map(|mb| mb / 1024.0);
                     let recommended_flavor = if vram_gb.unwrap_or(0.0) >= 5.5 {
                         "nvidia"
@@ -296,9 +311,92 @@ fn http_client() -> Result<Client, String> {
     Client::builder()
         .user_agent(concat!("Voice-Studio-AI/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(20))
-        .timeout(Duration::from_secs(120))
+        // Engine parts can be hundreds of MB. A total request deadline made
+        // otherwise healthy downloads fail on slower connections.
+        .timeout(None::<Duration>)
         .build()
         .map_err(|error| error.to_string())
+}
+
+fn validate_manifest(manifest: &EngineManifest) -> Result<(), String> {
+    if manifest.schema != 1 {
+        return Err(format!(
+            "Versión de catálogo no compatible: schema {}.",
+            manifest.schema
+        ));
+    }
+    if manifest.version.trim().is_empty() || manifest.engines.is_empty() {
+        return Err("El catálogo del motor no contiene paquetes válidos.".into());
+    }
+
+    for (package_index, package) in manifest.engines.iter().enumerate() {
+        if package.flavor.trim().is_empty()
+            || package.version.trim().is_empty()
+            || package.parts.is_empty()
+        {
+            return Err(format!(
+                "El paquete {} del catálogo está incompleto.",
+                package_index + 1
+            ));
+        }
+        if manifest.engines[..package_index]
+            .iter()
+            .any(|item| item.flavor.eq_ignore_ascii_case(&package.flavor))
+        {
+            return Err(format!("El catálogo repite el motor '{}'.", package.flavor));
+        }
+
+        let expected_download_bytes = package
+            .parts
+            .iter()
+            .try_fold(0u64, |total, part| total.checked_add(part.bytes))
+            .ok_or_else(|| format!("El tamaño del motor '{}' desborda u64.", package.flavor))?;
+        if package.download_bytes != expected_download_bytes || expected_download_bytes == 0 {
+            return Err(format!(
+                "El tamaño publicado para el motor '{}' no coincide con sus partes.",
+                package.flavor
+            ));
+        }
+
+        for (part_index, part) in package.parts.iter().enumerate() {
+            let safe_name = Path::new(&part.name)
+                .file_name()
+                .and_then(|name| name.to_str())
+                == Some(part.name.as_str());
+            if !safe_name || part.name.trim().is_empty() {
+                return Err(format!(
+                    "La parte {} del motor '{}' tiene un nombre inseguro.",
+                    part_index + 1,
+                    package.flavor
+                ));
+            }
+            if package.parts[..part_index]
+                .iter()
+                .any(|item| item.name.eq_ignore_ascii_case(&part.name))
+            {
+                return Err(format!(
+                    "El motor '{}' repite la parte '{}'.",
+                    package.flavor, part.name
+                ));
+            }
+            if !part.url.starts_with("https://") || part.bytes == 0 {
+                return Err(format!(
+                    "La parte '{}' no tiene una descarga HTTPS válida.",
+                    part.name
+                ));
+            }
+            if part.sha256.len() != 64
+                || !part.sha256.bytes().all(|value| value.is_ascii_hexdigit())
+            {
+                return Err(format!(
+                    "La parte '{}' no tiene un SHA-256 válido.",
+                    part.name
+                ));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn load_manifest() -> Result<EngineManifest, String> {
@@ -307,6 +405,7 @@ fn load_manifest() -> Result<EngineManifest, String> {
     let text = if source.starts_with("https://") || source.starts_with("http://") {
         let response = http_client()?
             .get(&source)
+            .timeout(Duration::from_secs(60))
             .send()
             .map_err(|error| format!("No se pudo consultar el catálogo del motor: {error}"))?;
 
@@ -329,9 +428,7 @@ fn load_manifest() -> Result<EngineManifest, String> {
     let manifest: EngineManifest = serde_json::from_str(&text)
         .map_err(|error| format!("engine-manifest.json no es válido: {error}"))?;
 
-    if manifest.engines.is_empty() {
-        return Err("El catálogo del motor no contiene paquetes.".into());
-    }
+    validate_manifest(&manifest)?;
 
     Ok(manifest)
 }
@@ -375,23 +472,34 @@ fn download_part(
     if destination.exists() && !part.sha256.is_empty() {
         if let Ok(existing_hash) = sha256_file(destination) {
             if existing_hash.eq_ignore_ascii_case(&part.sha256) {
-                let bytes = fs::metadata(destination).map(|m| m.len()).unwrap_or(part.bytes);
-                emit_progress(
-                    app,
-                    EngineProgress {
-                        stage: "downloading".into(),
-                        message: format!("Parte {part_index} de {part_count} ya estaba descargada."),
-                        percent: if total_bytes > 0 {
-                            ((already_completed + bytes) as f64 / total_bytes as f64) * 82.0
-                        } else { 0.0 },
-                        downloaded_bytes: already_completed + bytes,
-                        total_bytes,
-                        part_index,
-                        part_count,
-                        flavor: flavor.into(),
-                    },
-                );
-                return Ok(bytes);
+                let bytes = fs::metadata(destination)
+                    .map(|m| m.len())
+                    .unwrap_or(part.bytes);
+                if part.bytes > 0 && bytes != part.bytes {
+                    fs::remove_file(destination)
+                        .map_err(|error| format!("No se pudo reiniciar {}: {error}", part.name))?;
+                } else {
+                    emit_progress(
+                        app,
+                        EngineProgress {
+                            stage: "downloading".into(),
+                            message: format!(
+                                "Parte {part_index} de {part_count} ya estaba descargada."
+                            ),
+                            percent: if total_bytes > 0 {
+                                ((already_completed + bytes) as f64 / total_bytes as f64) * 82.0
+                            } else {
+                                0.0
+                            },
+                            downloaded_bytes: already_completed + bytes,
+                            total_bytes,
+                            part_index,
+                            part_count,
+                            flavor: flavor.into(),
+                        },
+                    );
+                    return Ok(bytes);
+                }
             }
         }
     }
@@ -400,7 +508,15 @@ fn download_part(
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
 
-    let existing = fs::metadata(destination).map(|m| m.len()).unwrap_or(0);
+    let mut existing = fs::metadata(destination).map(|m| m.len()).unwrap_or(0);
+    // A complete file with the wrong hash (or an oversized partial file)
+    // cannot be resumed. Start it again instead of requesting past EOF.
+    if existing > 0 && part.bytes > 0 && existing >= part.bytes {
+        fs::remove_file(destination)
+            .map_err(|error| format!("No se pudo reiniciar {}: {error}", part.name))?;
+        existing = 0;
+    }
+
     let mut request = client.get(&part.url);
     if existing > 0 {
         request = request.header(RANGE, format!("bytes={existing}-"));
@@ -410,6 +526,16 @@ fn download_part(
         .send()
         .map_err(|error| format!("No se pudo descargar {}: {error}", part.name))?;
 
+    if existing > 0 && response.status() == StatusCode::RANGE_NOT_SATISFIABLE {
+        fs::remove_file(destination)
+            .map_err(|error| format!("No se pudo reiniciar {}: {error}", part.name))?;
+        existing = 0;
+        response = client
+            .get(&part.url)
+            .send()
+            .map_err(|error| format!("No se pudo reiniciar la descarga {}: {error}", part.name))?;
+    }
+
     let append = existing > 0 && response.status() == StatusCode::PARTIAL_CONTENT;
     if !response.status().is_success() {
         return Err(format!(
@@ -417,6 +543,22 @@ fn download_part(
             part.name,
             response.status()
         ));
+    }
+
+    if append {
+        let expected = format!("bytes {existing}-");
+        let valid_range = response
+            .headers()
+            .get(CONTENT_RANGE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with(&expected));
+        if !valid_range {
+            let _ = fs::remove_file(destination);
+            return Err(format!(
+                "El servidor respondió con un rango inválido para {}. La descarga se reiniciará.",
+                part.name
+            ));
+        }
     }
 
     let mut file = if append {
@@ -435,7 +577,9 @@ fn download_part(
 
     loop {
         if cancel.load(Ordering::Relaxed) {
-            return Err("Instalación cancelada. La descarga parcial se conservará para reanudarla.".into());
+            return Err(
+                "Instalación cancelada. La descarga parcial se conservará para reanudarla.".into(),
+            );
         }
 
         let read = response
@@ -472,13 +616,22 @@ fn download_part(
     }
 
     file.flush().map_err(|error| error.to_string())?;
+    if part.bytes > 0 && downloaded != part.bytes {
+        if downloaded > part.bytes {
+            let _ = fs::remove_file(destination);
+        }
+        return Err(format!(
+            "La descarga {} quedó incompleta: se recibieron {} de {} bytes. Vuelve a intentarlo para reanudarla.",
+            part.name, downloaded, part.bytes
+        ));
+    }
     Ok(downloaded)
 }
 
 fn extract_archive(archive_path: &Path, destination: &Path) -> Result<(), String> {
     let file = File::open(archive_path).map_err(|error| error.to_string())?;
-    let mut archive = ZipArchive::new(file)
-        .map_err(|error| format!("Archivo de motor inválido: {error}"))?;
+    let mut archive =
+        ZipArchive::new(file).map_err(|error| format!("Archivo de motor inválido: {error}"))?;
     archive
         .extract(destination)
         .map_err(|error| format!("No se pudo extraer el motor: {error}"))
@@ -519,7 +672,10 @@ fn install_engine_blocking(
         .ok_or_else(|| format!("El catálogo no ofrece el motor '{flavor}'."))?;
 
     let root = app_engine_root(&app)?;
-    let downloads = root.join("downloads").join(&package.version).join(&package.flavor);
+    let downloads = root
+        .join("downloads")
+        .join(&package.version)
+        .join(&package.flavor);
     let staging = root.join(format!("staging-{}-{}", package.version, package.flavor));
     let runtime = root.join("runtime");
 
@@ -571,7 +727,11 @@ fn install_engine_blocking(
             &app,
             EngineProgress {
                 stage: "verifying".into(),
-                message: format!("Verificando parte {} de {}…", index + 1, package.parts.len()),
+                message: format!(
+                    "Verificando parte {} de {}…",
+                    index + 1,
+                    package.parts.len()
+                ),
                 percent: 82.0 + ((index + 1) as f64 / package.parts.len().max(1) as f64) * 7.0,
                 downloaded_bytes: completed,
                 total_bytes,
@@ -751,18 +911,12 @@ fn detect_hardware() -> HardwareInfo {
 }
 
 #[tauri::command]
-fn engine_status(
-    app: AppHandle,
-    process: State<EngineProcess>,
-) -> Result<EngineStatus, String> {
+fn engine_status(app: AppHandle, process: State<EngineProcess>) -> Result<EngineStatus, String> {
     engine_status_value(&app, process.inner())
 }
 
 #[tauri::command]
-fn engine_catalog(
-    app: AppHandle,
-    process: State<EngineProcess>,
-) -> Result<EngineCatalog, String> {
+fn engine_catalog(app: AppHandle, process: State<EngineProcess>) -> Result<EngineCatalog, String> {
     let manifest = load_manifest()?;
     let hardware = detect_hardware_value();
     let status = engine_status_value(&app, process.inner())?;
@@ -821,7 +975,66 @@ async fn install_engine(
         *running = false;
     }
 
+    if let Ok(root) = app_engine_root(&app) {
+        let error_path = root.join("last-install-error.log");
+        match &result {
+            Ok(_) => {
+                let _ = fs::remove_file(error_path);
+            }
+            Err(error) => {
+                let _ = fs::create_dir_all(&root);
+                let _ = fs::write(error_path, error.as_bytes());
+            }
+        }
+    }
+
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn valid_manifest() -> EngineManifest {
+        EngineManifest {
+            schema: 1,
+            version: "1.0.1".into(),
+            published_at: None,
+            engines: vec![EnginePackage {
+                flavor: "cpu".into(),
+                label: "Motor CPU".into(),
+                version: "1.0.1".into(),
+                download_bytes: 10,
+                installed_bytes: 20,
+                description: String::new(),
+                parts: vec![EnginePart {
+                    name: "voice-engine-cpu-part01.zip".into(),
+                    url: "https://example.com/voice-engine-cpu-part01.zip".into(),
+                    sha256: "a".repeat(64),
+                    bytes: 10,
+                }],
+            }],
+        }
+    }
+
+    #[test]
+    fn accepts_a_complete_engine_manifest() {
+        assert!(validate_manifest(&valid_manifest()).is_ok());
+    }
+
+    #[test]
+    fn rejects_unsafe_download_names() {
+        let mut manifest = valid_manifest();
+        manifest.engines[0].parts[0].name = "../engine.zip".into();
+        assert!(validate_manifest(&manifest).is_err());
+    }
+
+    #[test]
+    fn rejects_inconsistent_download_size() {
+        let mut manifest = valid_manifest();
+        manifest.engines[0].download_bytes = 11;
+        assert!(validate_manifest(&manifest).is_err());
+    }
 }
 
 #[tauri::command]
@@ -830,10 +1043,7 @@ fn cancel_engine_install(install_state: State<EngineInstallState>) {
 }
 
 #[tauri::command]
-fn start_engine(
-    app: AppHandle,
-    state: State<EngineProcess>,
-) -> Result<String, String> {
+fn start_engine(app: AppHandle, state: State<EngineProcess>) -> Result<String, String> {
     let mut guard = state
         .0
         .lock()
@@ -876,10 +1086,7 @@ fn stop_engine(state: State<EngineProcess>) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn uninstall_engine(
-    _app: AppHandle,
-    process: State<EngineProcess>,
-) -> Result<(), String> {
+fn uninstall_engine(_app: AppHandle, process: State<EngineProcess>) -> Result<(), String> {
     terminate_engine(process.inner())?;
 
     #[cfg(not(debug_assertions))]

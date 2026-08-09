@@ -1682,6 +1682,8 @@ def packaging_self_test() -> int:
     check("huggingface_hub", lambda: __import__("huggingface_hub").__version__)
 
     def qwen_check():
+        from importlib.util import find_spec
+
         from qwen_tts import Qwen3TTSModel
         from qwen_tts.core.tokenizer_12hz.configuration_qwen3_tts_tokenizer_v2 import (
             Qwen3TTSTokenizerV2Config,
@@ -1690,10 +1692,13 @@ def packaging_self_test() -> int:
             Qwen3TTSTokenizerV2Model,
         )
 
+        if find_spec("qwen_tts.core.tokenizer_25hz") is not None:
+            raise RuntimeError("El runtime todavía contiene tokenizer_25hz.")
+
         return (
             f"{Qwen3TTSModel.__name__}, "
             f"{Qwen3TTSTokenizerV2Config.__name__}, "
-            f"{Qwen3TTSTokenizerV2Model.__name__}"
+            f"{Qwen3TTSTokenizerV2Model.__name__}, 12Hz-only"
         )
 
     check("qwen_tts.Qwen3TTSModel", qwen_check)

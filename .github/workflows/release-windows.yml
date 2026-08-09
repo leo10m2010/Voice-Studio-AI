@@ -32,7 +32,7 @@ jobs:
 
       - name: Instalar dependencias
         shell: pwsh
-        run: npm install
+        run: npm ci
 
       - name: Comprobar versiones
         shell: pwsh
@@ -40,7 +40,7 @@ jobs:
 
       - name: Cargo check
         shell: pwsh
-        run: cargo check --manifest-path .\src-tauri\Cargo.toml
+        run: cargo check --locked --manifest-path .\src-tauri\Cargo.toml
 
       - name: Resolver version
         id: meta
@@ -51,6 +51,12 @@ jobs:
           $tag = "v$version"
           if ($env:GITHUB_REF_TYPE -eq "tag" -and $env:GITHUB_REF_NAME -ne $tag) {
             throw "El tag '$env:GITHUB_REF_NAME' no coincide con '$tag'."
+          }
+          if ($env:GITHUB_REF_TYPE -ne "tag") {
+            $existingTag = git ls-remote --tags origin "refs/tags/$tag"
+            if ($existingTag) {
+              throw "El tag '$tag' ya existe. Incrementa la versión antes de publicar desde workflow_dispatch."
+            }
           }
           "version=$version" >> $env:GITHUB_OUTPUT
           "tag=$tag" >> $env:GITHUB_OUTPUT

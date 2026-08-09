@@ -1,9 +1,14 @@
 node_modules/
 dist/
 .venv/
+.engine-build/
+engine-release/
 src-tauri/target/
 engine/build/
+engine/_vendor_slim/
 engine/*.spec
 engine-dist/qwen-engine/
+__pycache__/
+*.py[cod]
 *.log
 .DS_Store
