@@ -52,6 +52,7 @@ const state = {
   modelInstallId: null,
   activeSheet: null,
   selectedSoundId: "",
+  musicBusy: false,
   engine: {
     status: null,
     catalog: null,
@@ -143,6 +144,30 @@ document.querySelector("#app").innerHTML = `
               <span class="player-time" id="playerCurrent">0:00</span>
               <canvas class="waveform" id="waveform" width="700" height="58" aria-label="Forma de onda"></canvas>
               <span class="player-time" id="playerDuration">0:00</span>
+              <div class="volume-wrap music-wrap">
+                <button class="player-icon pressable" id="musicButton" aria-label="Música de fondo">${icons.music}</button>
+                <div class="volume-popover music-popover" id="musicPopover">
+                  <label class="music-popover-label">Música de fondo</label>
+                  <div class="sound-picker-row">
+                    <div class="select-native">
+                      <select id="soundSelect"><option value="">Sin música</option></select>
+                      ${icons.chevron}
+                    </div>
+                    <button class="icon-button pressable" id="previewSound" title="Escuchar">${icons.play}</button>
+                    <button class="icon-button pressable" id="addSound" title="Agregar música">${icons.plus}</button>
+                  </div>
+                  <div class="slider-setting music-volume-setting">
+                    <div class="slider-title"><label>Volumen</label><output id="musicVolumeValue">18%</output></div>
+                    <input id="musicVolume" type="range" min="5" max="40" value="18" step="1">
+                  </div>
+                  <p class="music-status" id="musicStatus">Elige una pista y aplícala a esta locución ya generada.</p>
+                  <button class="repair-library pressable" id="repairSounds" type="button">Reparar biblioteca de música</button>
+                  <div class="music-popover-actions">
+                    <button class="secondary-button pressable" id="removeMusic" type="button" disabled>Quitar música</button>
+                    <button class="secondary-button pressable apply-music" id="applyMusic" type="button" disabled>Aplicar música</button>
+                  </div>
+                </div>
+              </div>
               <div class="volume-wrap">
                 <button class="player-icon pressable" id="volumeButton" aria-label="Volumen">${icons.volume}</button>
                 <div class="volume-popover" id="volumePopover">
@@ -274,24 +299,6 @@ document.querySelector("#app").innerHTML = `
                 </select>
                 ${icons.chevron}
               </div>
-            </div>
-
-            <div class="setting-block compact-top">
-              <label>Música de fondo</label>
-              <div class="sound-picker-row">
-                <div class="select-native">
-                  <select id="soundSelect"><option value="">Sin música</option></select>
-                  ${icons.chevron}
-                </div>
-                <button class="icon-button pressable" id="previewSound" title="Escuchar">${icons.play}</button>
-                <button class="icon-button pressable" id="addSound" title="Agregar música">${icons.plus}</button>
-              </div>
-              <button class="repair-library pressable" id="repairSounds" type="button">Reparar biblioteca de música</button>
-              <div class="slider-setting music-volume-setting">
-                <div class="slider-title"><label>Volumen</label><output id="musicVolumeValue">18%</output></div>
-                <input id="musicVolume" type="range" min="5" max="40" value="18" step="1">
-              </div>
-              <p class="music-status" id="musicStatus">Sin música. El archivo final contendrá solo la locución.</p>
             </div>
 
             <div class="toggle-row">
@@ -544,6 +551,7 @@ const el = {
   generate: $("#generateButton"), generateIcon: $("#generateIcon"), generateText: $("#generateText"), transport: $("#transport"),
   audio: $("#resultAudio"), player: $("#audioPlayer"), playerPlay: $("#playerPlay"), playerCurrent: $("#playerCurrent"),
   playerDuration: $("#playerDuration"), waveform: $("#waveform"), volumeButton: $("#volumeButton"), volumePopover: $("#volumePopover"),
+  musicButton: $("#musicButton"), musicPopover: $("#musicPopover"), applyMusic: $("#applyMusic"), removeMusic: $("#removeMusic"),
   playerVolume: $("#playerVolume"), download: $("#downloadButton"), bottomVoice: $("#bottomVoice"), bottomMode: $("#bottomMode"),
   hardware: $("#hardwareText"), voiceSelector: $("#voiceSelector"), selectedVoiceName: $("#selectedVoiceName"), selectedVoiceMeta: $("#selectedVoiceMeta"),
   referenceScore: $("#referenceScore"), referenceLabel: $("#referenceLabel"), referenceDetails: $("#referenceDetails"), improveClone: $("#improveClone"),
@@ -871,10 +879,42 @@ function updateMusicUI(){
   el.soundSelect.value=selected ? selected.id : "";
   el.previewSound.disabled=!selected;
 
-  if(selected){
-    el.musicStatus.innerHTML=`<strong>${esc(selected.name)}</strong> · ${el.musicVolume.value}% · se mezclará y guardará dentro del archivo final.`;
+  const hasResult=!!state.result?.history?.id;
+  const appliedId=state.result?.music_id||"";
+  el.applyMusic.disabled=!hasResult||!selected||selected.id===appliedId||state.musicBusy;
+  el.removeMusic.disabled=!hasResult||!appliedId||state.musicBusy;
+  el.musicButton.classList.toggle("has-music",!!appliedId);
+
+  if(!hasResult){
+    el.musicStatus.textContent="Genera una locución primero para poder agregarle música.";
+  }else if(selected){
+    el.musicStatus.innerHTML=selected.id===appliedId
+      ? `<strong>${esc(selected.name)}</strong> ya está aplicada a este resultado.`
+      : `<strong>${esc(selected.name)}</strong> · ${el.musicVolume.value}% · pulsa "Aplicar música" para mezclarla.`;
+  }else if(appliedId){
+    el.musicStatus.innerHTML=`<strong>${esc(state.result.music_name||"Música")}</strong> aplicada. Elige otra pista o quítala.`;
   }else{
-    el.musicStatus.textContent="Sin música. El archivo final contendrá solo la locución.";
+    el.musicStatus.textContent="Sin música. Elige una pista y aplícala a esta locución ya generada.";
+  }
+}
+
+async function updateResultMusic(soundId){
+  const historyId=state.result?.history?.id;
+  if(!historyId||state.musicBusy)return;
+  state.musicBusy=true;updateMusicUI();
+  try{
+    const updated=await api(`/api/history/${encodeURIComponent(historyId)}/music`,{
+      method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({sound_id:soundId||null,music_volume:Number(el.musicVolume.value)/100})
+    });
+    state.result={...state.result,history:updated,music_id:updated.music_id,music_name:updated.music_name,url:updated.url,filename:updated.filename};
+    await setResultAudio(`${API}${updated.url}`,updated.filename,state.voice?.name);
+    await refreshData();
+    toast(soundId?`Música aplicada: ${updated.music_name}`:"Música quitada.","success");
+  }catch(e){
+    toast(e.message,"error");
+  }finally{
+    state.musicBusy=false;updateMusicUI();
   }
 }
 
@@ -1001,7 +1041,7 @@ function savePreferences(){
   try{
     localStorage.setItem("vsa-settings",JSON.stringify({
       model_id:selectedModel()?.id||DEFAULT_MODEL_ID,profile:state.profile,speed:el.speed.value,stability:el.stability.value,style:el.style.value,
-      pitch:el.pitch.value,output:el.output.value,mode:el.mode.value,musicVolume:el.musicVolume.value,soundId:state.selectedSoundId,boost:el.speakerBoost.classList.contains("on")
+      pitch:el.pitch.value,output:el.output.value,mode:el.mode.value,musicVolume:el.musicVolume.value,boost:el.speakerBoost.classList.contains("on")
     }));
   }catch{
     // Storage may be unavailable in restricted WebViews; navigation must still work.
@@ -1012,7 +1052,7 @@ function loadPreferences(){
     const p=JSON.parse(localStorage.getItem("vsa-settings")||"{}");state.profile=p.profile||"natural";
     const base=PROFILE_VALUES[state.profile]||PROFILE_VALUES.natural;
     el.speed.value=p.speed??base.speed;el.stability.value=p.stability??base.stability;el.style.value=p.style??base.style;el.pitch.value=p.pitch??base.pitch;
-    el.output.value=p.output||"wav";el.mode.value=p.mode||"auto";el.musicVolume.value=p.musicVolume||18;state.selectedSoundId=p.soundId||"";
+    el.output.value=p.output||"wav";el.mode.value=p.mode||"auto";el.musicVolume.value=p.musicVolume||18;state.selectedSoundId="";
     el.speakerBoost.classList.toggle("on",p.boost??base.boost);el.speakerBoost.setAttribute("aria-pressed",String(p.boost??base.boost));
     $$("#profileButtons button").forEach(b=>b.classList.toggle("active",b.dataset.profile===state.profile));
     const candidate=state.models.compatible.find(m=>m.id===(p.model_id||DEFAULT_MODEL_ID));
@@ -1026,8 +1066,7 @@ function settingsPayload(){
   return {
     text:el.script.value.trim(),voice_id:state.voice.id,model_id:selectedModel().id,language:"Spanish",mode:el.mode.value,profile:state.profile,
     speed:Number(el.speed.value),stability:Number(el.stability.value)/100,style_exaggeration:Number(el.style.value)/100,
-    pitch_semitones:Number(el.pitch.value),speaker_boost:el.speakerBoost.classList.contains("on"),output_format:el.output.value,
-    music_id:state.selectedSoundId||null,music_volume:Number(el.musicVolume.value)/100
+    pitch_semitones:Number(el.pitch.value),speaker_boost:el.speakerBoost.classList.contains("on"),output_format:el.output.value
   }
 }
 
@@ -1062,12 +1101,13 @@ async function generate(){
   try{
     const result=await api("/api/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(settingsPayload())});
     const url=`${API}${result.url}`,name=result.filename;
-    state.result=result;
+    state.result=result;state.selectedSoundId="";
     await setResultAudio(url,name,state.voice.name);
+    updateMusicUI();
     el.strip.classList.add("success");
     el.stripTitle.textContent="Locución lista";
-    el.stripText.textContent=`${result.model_name} · ${result.backend.toUpperCase()} · ${result.used_transcript?"ICL":"X-vector"}${result.music_name?` · ♪ ${result.music_name}`:""}`;
-    await refreshData();toast("Locución generada.","success");hideStrip(1450);
+    el.stripText.textContent=`${result.model_name} · ${result.backend.toUpperCase()} · ${result.used_transcript?"ICL":"X-vector"}`;
+    await refreshData();toast("Locución generada. Ahora puedes agregarle música desde el reproductor.","success");hideStrip(1450);
   }catch(e){
     el.strip.classList.add("visible","error");el.stripTitle.textContent="No se pudo generar";el.stripText.textContent=e.message;toast(e.message,"error");hideStrip(4300);
   }finally{clearInterval(state.statusTimer);state.statusTimer=null;setBusy(false)}
@@ -1110,6 +1150,7 @@ function wirePlayer(){
   el.waveform.addEventListener("pointermove",e=>{if(state.seeking)seekFromEvent(e)});
   el.waveform.addEventListener("pointerup",()=>state.seeking=false);el.waveform.addEventListener("pointercancel",()=>state.seeking=false);
   el.volumeButton.onclick=()=>el.volumePopover.classList.toggle("open");
+  el.musicButton.onclick=()=>el.musicPopover.classList.toggle("open");
   el.playerVolume.oninput=()=>el.audio.volume=Number(el.playerVolume.value);
   window.addEventListener("resize",drawWaveform);
 }
@@ -1564,6 +1605,8 @@ el.musicVolume.oninput=()=>{
   updateMusicUI();
   savePreferences();
 };
+el.applyMusic.onclick=()=>updateResultMusic(state.selectedSoundId||null);
+el.removeMusic.onclick=()=>updateResultMusic(null);
 el.speakerBoost.onclick=()=>{toggle(el.speakerBoost);savePreferences()};el.reset.onclick=()=>{state.profile="natural";applyProfile("natural",false);el.mode.value="auto";el.output.value="wav";savePreferences();toast("Valores restablecidos.")};
 
 el.installEngineButton.onclick=installSelectedEngine;
@@ -1598,7 +1641,10 @@ window.addEventListener("keydown",e=>{
 document.addEventListener("pointerdown",e=>{const b=e.target.closest(".pressable");if(b)b.classList.add("is-pressed")},{passive:true});
 document.addEventListener("pointerup",()=>$$(".is-pressed").forEach(x=>x.classList.remove("is-pressed")),{passive:true});
 document.addEventListener("pointercancel",()=>$$(".is-pressed").forEach(x=>x.classList.remove("is-pressed")),{passive:true});
-document.addEventListener("click",e=>{if(!e.target.closest(".volume-wrap"))el.volumePopover.classList.remove("open")});
+document.addEventListener("click",e=>{
+  if(!e.target.closest(".volume-wrap"))el.volumePopover.classList.remove("open");
+  if(!e.target.closest(".music-wrap"))el.musicPopover.classList.remove("open");
+});
 
 async function launchWorkspace(){
   if(state.engine.bootStarted)return;

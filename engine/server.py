@@ -1149,6 +1149,11 @@ class TranscriptUpdate(BaseModel):
     transcript: str = ""
 
 
+class HistoryMusicRequest(BaseModel):
+    sound_id: Optional[str] = None
+    music_volume: float = 0.18
+
+
 def find_audio(directory: Path, audio_id: str) -> Path:
     for path in directory.iterdir():
         if path.is_file() and path.suffix.lower() in ALLOWED_AUDIO:
@@ -1640,6 +1645,9 @@ def generate(request: GenerateRequest):
             "music_id": request.music_id,
             "music_name": music_name,
             "filename": filename,
+            # The dry (voice-only) render, kept so background music can be
+            # added, swapped, or removed later without regenerating the TTS.
+            "dry_filename": filename if not request.music_id else None,
             "url": f"/api/outputs/{filename}",
             "used_transcript": bool(ref_text),
             "settings": {
@@ -1697,6 +1705,85 @@ def generate(request: GenerateRequest):
             status_code=500,
             detail=f"{type(exc).__name__}: {exc}",
         ) from exc
+
+
+@app.post("/api/history/{history_id}/music")
+def set_history_music(history_id: str, request: HistoryMusicRequest):
+    """
+    Post-production step: add, swap, or remove background music on an
+    already-generated result without re-running the TTS model. Always mixes
+    from the untouched dry (voice-only) render, so this can be called
+    repeatedly with different tracks/volumes.
+    """
+    items = load_history()
+    item = next((it for it in items if it.get("id") == history_id), None)
+    if item is None:
+        raise HTTPException(status_code=404, detail="No se encontró ese resultado en el historial.")
+
+    dry_filename = item.get("dry_filename")
+    if not dry_filename:
+        raise HTTPException(
+            status_code=400,
+            detail="Este resultado no tiene una locución sin música guardada para remezclar.",
+        )
+
+    dry_path = OUTPUTS_DIR / dry_filename
+    if not dry_path.exists():
+        raise HTTPException(status_code=404, detail="El audio original ya no está disponible.")
+
+    extension = Path(item.get("filename", dry_filename)).suffix.lstrip(".") or "wav"
+    settings = item.setdefault("settings", {})
+
+    if not request.sound_id:
+        item["filename"] = dry_filename
+        item["url"] = f"/api/outputs/{dry_filename}"
+        item["music_id"] = None
+        item["music_name"] = None
+        settings["music_id"] = None
+        settings["music_name"] = None
+        save_history(items)
+        return item
+
+    music_path = find_audio(SOUNDS_DIR, request.sound_id)
+    valid_music, music_error, _ = validate_canonical_music(music_path)
+    if not valid_music:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"La música '{music_path.name}' no es un audio válido. "
+                f"{music_error or ''} "
+                "Pulsa 'Reparar biblioteca de música' o vuelve a importarla."
+            ).strip(),
+        )
+
+    import soundfile as sf
+
+    voice_wav, sample_rate = sf.read(str(dry_path), dtype="float32", always_2d=False)
+    music_volume = clamp(request.music_volume, 0.0, 0.60)
+    mixed = mix_voice_with_music(
+        voice_wav=voice_wav,
+        sample_rate=sample_rate,
+        music_path=music_path,
+        music_volume=music_volume,
+    )
+
+    music_name = pretty_name(music_path.name)
+    filename = f"locucion_{int(time.time())}_{uuid.uuid4().hex[:5]}.{extension}"
+    output_path = OUTPUTS_DIR / filename
+    if extension == "flac":
+        sf.write(str(output_path), mixed, sample_rate, format="FLAC")
+    else:
+        sf.write(str(output_path), mixed, sample_rate, format="WAV")
+
+    item["filename"] = filename
+    item["url"] = f"/api/outputs/{filename}"
+    item["music_id"] = request.sound_id
+    item["music_name"] = music_name
+    settings["music_id"] = request.sound_id
+    settings["music_name"] = music_name
+    settings["music_volume"] = round(music_volume, 2)
+    save_history(items)
+    return item
 
 
 def packaging_self_test() -> int:
