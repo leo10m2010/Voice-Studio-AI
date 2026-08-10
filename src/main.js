@@ -1352,12 +1352,22 @@ async function loadEngineCatalog({showErrors=true}={}){
   }
 }
 function updateInstallSteps(stage){
-  const order=["downloading","verifying","installing","testing"];
+  // Downloading/verifying/installing repeat once per downloaded part (an
+  // engine can ship as several parts), so the first 3 boxes are treated as a
+  // single ongoing phase — otherwise the tracker would flip back to "En
+  // espera" on every part instead of only moving forward.
   const normalized=stage==="preparing"?"downloading":stage==="done"?"testing":stage;
-  const current=Math.max(0,order.indexOf(normalized));
+  const inPartCycle=normalized==="downloading"||normalized==="verifying"||normalized==="installing";
+  const pastPartCycle=normalized==="testing";
   [...el.setupSteps.children].forEach((row,index)=>{
-    const completed=stage==="done"||index<current;
-    const active=stage!=="done"&&index===current;
+    let completed,active;
+    if(index<3){
+      completed=stage==="done"||pastPartCycle;
+      active=!completed&&inPartCycle;
+    }else{
+      completed=stage==="done";
+      active=!completed&&normalized==="testing";
+    }
     row.classList.toggle("complete",completed);
     row.classList.toggle("active",active);
     row.querySelector("b").textContent=completed?"Listo":active?"En curso":"En espera";

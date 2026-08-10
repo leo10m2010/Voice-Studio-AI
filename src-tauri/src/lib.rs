@@ -25,6 +25,11 @@ use std::os::windows::process::CommandExt;
 
 const ENGINE_MANIFEST_URL: &str = "https://github.com/leo10m2010/Voice-Studio-AI/releases/download/engine-v1.0.2/engine-manifest.json";
 const ENGINE_PORT: &str = "8765";
+// Percent budget for downloading+verifying+installing all parts, combined and
+// byte-weighted, so the bar advances by actual size instead of by part count
+// and never regresses when a new part starts. The remainder is the one-time
+// final self-test after every part has landed.
+const DOWNLOAD_PERCENT_SPAN: f64 = 92.0;
 
 struct EngineProcess(Mutex<Option<Child>>);
 
@@ -487,7 +492,8 @@ fn download_part(
                                 "Parte {part_index} de {part_count} ya estaba descargada."
                             ),
                             percent: if total_bytes > 0 {
-                                ((already_completed + bytes) as f64 / total_bytes as f64) * 82.0
+                                ((already_completed + bytes) as f64 / total_bytes as f64)
+                                    * DOWNLOAD_PERCENT_SPAN
                             } else {
                                 0.0
                             },
@@ -595,7 +601,7 @@ fn download_part(
 
         let global_downloaded = already_completed.saturating_add(downloaded);
         let percent = if total_bytes > 0 {
-            (global_downloaded as f64 / total_bytes as f64).min(1.0) * 82.0
+            (global_downloaded as f64 / total_bytes as f64).min(1.0) * DOWNLOAD_PERCENT_SPAN
         } else {
             0.0
         };
@@ -723,6 +729,16 @@ fn install_engine_blocking(
         )?;
         completed = completed.saturating_add(actual);
 
+        // Percent is derived from cumulative bytes (not part index) so it never
+        // regresses when the next part starts downloading: a small part doesn't
+        // jump the bar as far as a large one, and downloading part N+1 always
+        // continues from where part N left off instead of dipping back down.
+        let bytes_percent = if total_bytes > 0 {
+            (completed as f64 / total_bytes as f64).min(1.0) * DOWNLOAD_PERCENT_SPAN
+        } else {
+            0.0
+        };
+
         emit_progress(
             &app,
             EngineProgress {
@@ -732,7 +748,7 @@ fn install_engine_blocking(
                     index + 1,
                     package.parts.len()
                 ),
-                percent: 82.0 + ((index + 1) as f64 / package.parts.len().max(1) as f64) * 7.0,
+                percent: bytes_percent,
                 downloaded_bytes: completed,
                 total_bytes,
                 part_index: index + 1,
@@ -761,7 +777,7 @@ fn install_engine_blocking(
             EngineProgress {
                 stage: "installing".into(),
                 message: format!("Instalando parte {} de {}…", index + 1, package.parts.len()),
-                percent: 89.0 + ((index + 1) as f64 / package.parts.len().max(1) as f64) * 7.0,
+                percent: bytes_percent,
                 downloaded_bytes: completed,
                 total_bytes,
                 part_index: index + 1,
