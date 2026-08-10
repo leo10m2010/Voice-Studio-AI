@@ -19,7 +19,11 @@ def _as_mono_voice(wav) -> np.ndarray:
     return np.mean(y, axis=1, dtype=np.float32)
 
 
-def _as_stereo_music(path: Path, sample_rate: int) -> np.ndarray:
+_MUSIC_DECODE_CACHE: dict[tuple, np.ndarray] = {}
+_MUSIC_DECODE_CACHE_MAX = 12
+
+
+def _decode_stereo_music(path: Path, sample_rate: int) -> np.ndarray:
     try:
         music, _ = librosa.load(
             str(path),
@@ -48,6 +52,32 @@ def _as_stereo_music(path: Path, sample_rate: int) -> np.ndarray:
     if music.shape[0] == 1:
         return np.repeat(music, 2, axis=0)
     return music[:2]
+
+
+def _as_stereo_music(path: Path, sample_rate: int) -> np.ndarray:
+    """
+    Same track/sample-rate combos get mixed repeatedly (background music picker,
+    re-mixing a result with a new volume, etc.), so cache the decoded+resampled
+    result instead of re-running librosa.load on every call. Keyed on mtime/size
+    so replacing a file (e.g. re-importing under the same name) invalidates it.
+    """
+    try:
+        stat = path.stat()
+        cache_key = (str(path.resolve()), stat.st_mtime_ns, stat.st_size, sample_rate)
+    except OSError:
+        cache_key = None
+
+    if cache_key is not None and cache_key in _MUSIC_DECODE_CACHE:
+        return _MUSIC_DECODE_CACHE[cache_key].copy()
+
+    result = _decode_stereo_music(path, sample_rate)
+
+    if cache_key is not None:
+        if len(_MUSIC_DECODE_CACHE) >= _MUSIC_DECODE_CACHE_MAX:
+            _MUSIC_DECODE_CACHE.pop(next(iter(_MUSIC_DECODE_CACHE)))
+        _MUSIC_DECODE_CACHE[cache_key] = result
+
+    return result.copy()
 
 
 def _normalize_music(music: np.ndarray, target_dbfs: float = -18.0) -> np.ndarray:

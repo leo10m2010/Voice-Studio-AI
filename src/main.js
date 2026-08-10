@@ -588,7 +588,12 @@ function fmtTime(v){if(!Number.isFinite(v)||v<0)return"0:00";const m=Math.floor(
 function prettyDate(v){try{return new Intl.DateTimeFormat("es-PE",{dateStyle:"medium",timeStyle:"short"}).format(new Date(v))}catch{return""}}
 
 async function api(path, options={}){
-  const r=await fetch(`${API}${path}`,{cache:"no-store",...options});
+  let r;
+  try{
+    r=await fetch(`${API}${path}`,{cache:"no-store",...options});
+  }catch{
+    throw new Error("No se pudo conectar con el motor local. Puede haberse detenido; reinicia Voice Studio AI.");
+  }
   if(!r.ok){const b=await r.json().catch(()=>({}));throw new Error(b.detail||b.error||`HTTP ${r.status}`)}
   return r.headers.get("content-type")?.includes("json")?r.json():r;
 }
@@ -1092,7 +1097,24 @@ function stageFor(st){
   };
   const [a,b]=map[st.stage]||["Procesando",st.message||"Trabajando localmente."];el.stripTitle.textContent=a;el.stripText.textContent=b;el.stripEngine.textContent=String(st.backend||"LOCAL").toUpperCase()
 }
-function pollStatus(){clearInterval(state.statusTimer);state.statusTimer=setInterval(async()=>{try{stageFor(await api("/api/status"))}catch{}},650)}
+function pollStatus(){
+  clearInterval(state.statusTimer);
+  let misses=0;
+  state.statusTimer=setInterval(async()=>{
+    try{
+      stageFor(await api("/api/status"));
+      misses=0;
+    }catch{
+      // A few consecutive misses during a long generation are normal jitter;
+      // beyond that, the engine likely stopped responding — say so instead
+      // of leaving a stale "Generando…" message with no explanation.
+      if(++misses===4){
+        el.stripTitle.textContent="El motor no responde";
+        el.stripText.textContent="Puede haberse detenido. Esperando respuesta…";
+      }
+    }
+  },650);
+}
 
 async function generate(){
   if(!state.voice||!selectedModel()?.compatible||!el.script.value.trim())return;

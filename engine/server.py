@@ -894,9 +894,9 @@ class ModelManager:
             pass
 
     def choose_backend(self, requested: str, model_id: str) -> str:
-        info = torch_info()
         if requested == "cpu":
             return "cpu"
+        info = torch_info()
         if requested == "cuda":
             if not info.get("cuda_available"):
                 raise RuntimeError("CUDA no está disponible en este equipo.")
@@ -1033,6 +1033,11 @@ class ModelManager:
                         text, voice_path, ref_text, language, "cpu", generation, model_id
                     )
 
+                # Any other failure may have left the model/CUDA context in a
+                # bad state (e.g. a CUDA fault mid-generation). Drop it so the
+                # next request starts from a clean reload instead of reusing
+                # a possibly-wedged model and failing the same way forever.
+                self.unload()
                 raise
 
     def _generate_once(
