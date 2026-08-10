@@ -32,7 +32,10 @@
     "targets": [
       "nsis"
     ],
-    "resources": [],
+    "resources": {
+      "../assets/voice": "assets/voice",
+      "../assets/sonidos": "assets/sonidos"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

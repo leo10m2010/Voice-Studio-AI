@@ -901,6 +901,10 @@ fn spawn_engine(_app: &AppHandle) -> Result<Child, String> {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
 
+        if let Ok(resource_dir) = app.path().resource_dir() {
+            command.env("QWEN_STUDIO_ROOT", resource_dir);
+        }
+
         return command.spawn().map_err(|error| error.to_string());
     }
 }

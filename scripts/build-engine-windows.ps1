@@ -65,7 +65,6 @@ try {
         --exclude-module sox `
         --exclude-module gradio `
         --exclude-module pandas `
-        --exclude-module sklearn `
         --exclude-module matplotlib `
         --exclude-module tensorflow `
         --exclude-module tensorboard `

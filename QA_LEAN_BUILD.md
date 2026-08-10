@@ -41,7 +41,6 @@ Se excluyen:
 - onnxruntime/sox de la ruta 25Hz;
 - Gradio;
 - pandas;
-- sklearn;
 - matplotlib;
 - TensorFlow;
 - TensorBoard;
@@ -63,6 +62,14 @@ Se elimina del vendor empaquetado:
 - `qwen_tts/core/tokenizer_25hz`
 
 y el wrapper de tokenizer registra únicamente Tokenizer V2 / 12Hz.
+
+## Nota: `scikit-learn` NO se puede excluir
+
+`librosa` importa `sklearn` (`decompose`/`segment`) en su `__init__.py`, así
+que es una dependencia dura, no opcional. Excluirla con
+`--exclude-module sklearn` rompía `import librosa` en el motor empaquetado y
+causaba `No se pudo preparar '<archivo>'. No module named 'sklearn'` al subir
+cualquier voz nueva. Se eliminó ese exclude-module.
 
 ## Self-test obligatorio
 
