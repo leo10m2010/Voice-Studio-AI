@@ -14,7 +14,7 @@ if ($rust.Contains("if let Ok(mut guard) = state.0.lock()")) {
     throw "Tu src-tauri\src\lib.rs todavía contiene el código viejo que provoca E0597."
 }
 
-if (-not $rust.Contains("terminate_engine(state.inner())")) {
+if (-not $rust.Contains("terminate_engine(state.inner(), expected_stop.inner())")) {
     throw "No se encontró el fix Rust esperado."
 }
 
