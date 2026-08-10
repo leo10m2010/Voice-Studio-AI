@@ -401,6 +401,29 @@ class EngineStatus:
 STATUS = EngineStatus()
 
 
+class GenerationCancelled(RuntimeError):
+    pass
+
+
+_CANCEL_LOCK = threading.Lock()
+_CANCELLED_REQUESTS: set[str] = set()
+
+
+def mark_generation_cancelled(request_id: str) -> None:
+    with _CANCEL_LOCK:
+        _CANCELLED_REQUESTS.add(request_id)
+
+
+def is_generation_cancelled(request_id: str) -> bool:
+    with _CANCEL_LOCK:
+        return request_id in _CANCELLED_REQUESTS
+
+
+def clear_generation_cancelled(request_id: str) -> None:
+    with _CANCEL_LOCK:
+        _CANCELLED_REQUESTS.discard(request_id)
+
+
 def torch_info() -> dict:
     try:
         import torch
@@ -1009,13 +1032,14 @@ class ModelManager:
         requested_mode: str,
         generation: dict,
         model_id: str,
+        request_id: str = "",
     ):
         with self.generate_lock:
             target = self.choose_backend(requested_mode, model_id)
 
             try:
                 return self._generate_once(
-                    text, voice_path, ref_text, language, target, generation, model_id
+                    text, voice_path, ref_text, language, target, generation, model_id, request_id
                 )
             except Exception as first_error:
                 is_auto_cuda = requested_mode == "auto" and target == "cuda"
@@ -1030,7 +1054,7 @@ class ModelManager:
                     )
                     self.unload()
                     return self._generate_once(
-                        text, voice_path, ref_text, language, "cpu", generation, model_id
+                        text, voice_path, ref_text, language, "cpu", generation, model_id, request_id
                     )
 
                 # Any other failure may have left the model/CUDA context in a
@@ -1049,6 +1073,7 @@ class ModelManager:
         backend: str,
         generation: dict,
         model_id: str,
+        request_id: str = "",
     ):
         model, actual_backend = self.load(backend, model_id)
 
@@ -1077,6 +1102,9 @@ class ModelManager:
         sample_rate = None
 
         for index, chunk in enumerate(chunks, start=1):
+            if request_id and is_generation_cancelled(request_id):
+                raise GenerationCancelled("Generación cancelada por el usuario.")
+
             STATUS.set(
                 "generating",
                 f"Generando locución {index}/{len(chunks)}",
@@ -1144,6 +1172,11 @@ class GenerateRequest(BaseModel):
     output_format: Literal["wav", "flac"] = "wav"
     music_id: Optional[str] = None
     music_volume: float = 0.18
+    request_id: str = ""
+
+
+class CancelGenerateRequest(BaseModel):
+    request_id: str
 
 
 class ModelInstallRequest(BaseModel):
@@ -1584,6 +1617,7 @@ def generate(request: GenerateRequest):
             requested_mode=request.mode,
             generation=generation,
             model_id=request.model_id,
+            request_id=request.request_id,
         )
 
         STATUS.set(
@@ -1699,6 +1733,9 @@ def generate(request: GenerateRequest):
             "history": history_item,
             "qwen_sampling": generation,
         }
+    except GenerationCancelled as exc:
+        STATUS.set("idle", "Motor listo", "Generación cancelada por el usuario.", MODEL_MANAGER.backend)
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except Exception as exc:
         STATUS.set(
             "error",
@@ -1710,6 +1747,16 @@ def generate(request: GenerateRequest):
             status_code=500,
             detail=f"{type(exc).__name__}: {exc}",
         ) from exc
+    finally:
+        if request.request_id:
+            clear_generation_cancelled(request.request_id)
+
+
+@app.post("/api/generate/cancel")
+def cancel_generate(request: CancelGenerateRequest):
+    if request.request_id:
+        mark_generation_cancelled(request.request_id)
+    return {"ok": True}
 
 
 @app.post("/api/history/{history_id}/music")

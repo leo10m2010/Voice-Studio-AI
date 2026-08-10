@@ -50,8 +50,8 @@ jobs:
             throw "Codigo Rust antiguo detectado: state.0.lock() dentro de on_window_event. Este commit no contiene el fix E0597."
           }
 
-          if (-not $rust.Contains("terminate_engine(state.inner())")) {
-            throw "No se encontro el fix Rust esperado: terminate_engine(state.inner())."
+          if (-not $rust.Contains("terminate_engine(state.inner(), expected_stop.inner())")) {
+            throw "No se encontro el fix Rust esperado: terminate_engine(state.inner(), expected_stop.inner())."
           }
 
           Write-Host "Fix Rust correcto." -ForegroundColor Green

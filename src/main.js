@@ -28,7 +28,8 @@ const icons = {
   package: `<svg viewBox="0 0 24 24"><path d="m12 3 8 4.5v9L12 21l-8-4.5v-9L12 3Z"/><path d="m4 7.5 8 4.5 8-4.5M12 12v9"/></svg>`,
   shield: `<svg viewBox="0 0 24 24"><path d="M12 3 5 6v5c0 4.6 2.8 8 7 10 4.2-2 7-5.4 7-10V6l-7-3Z"/><path d="m9 12 2 2 4-5"/></svg>`,
   wifi: `<svg viewBox="0 0 24 24"><path d="M5 9a11 11 0 0 1 14 0M8 12a7 7 0 0 1 8 0M11 15a2.5 2.5 0 0 1 2 0"/><circle cx="12" cy="18" r=".8" fill="currentColor" stroke="none"/></svg>`,
-  refresh: `<svg viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M18.5 9A7 7 0 0 0 6 7M5.5 15A7 7 0 0 0 18 17"/></svg>`
+  refresh: `<svg viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M18.5 9A7 7 0 0 0 6 7M5.5 15A7 7 0 0 0 18 17"/></svg>`,
+  close: `<svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg>`
 };
 
 const state = {
@@ -53,6 +54,8 @@ const state = {
   activeSheet: null,
   selectedSoundId: "",
   musicBusy: false,
+  generationRequestId: null,
+  generationController: null,
   engine: {
     status: null,
     catalog: null,
@@ -60,7 +63,8 @@ const state = {
     selectedFlavor: "cpu",
     installing: false,
     bridgeReady: false,
-    bootStarted: false
+    bootStarted: false,
+    recovering: false
   }
 };
 
@@ -121,6 +125,7 @@ document.querySelector("#app").innerHTML = `
             <span id="generationText">Preparando el motor…</span>
           </div>
           <span class="generation-engine" id="generationEngine">LOCAL</span>
+          <button class="strip-cancel pressable" id="cancelGeneration" type="button" title="Cancelar generación" hidden>${icons.close}</button>
         </div>
 
         <div class="bottom-dock glass">
@@ -547,7 +552,7 @@ const $$ = q => [...document.querySelectorAll(q)];
 
 const el = {
   script: $("#scriptInput"), count: $("#characterCount"), duration: $("#durationEstimate"), icl: $("#iclStatus"),
-  strip: $("#generationStrip"), stripTitle: $("#generationTitle"), stripText: $("#generationText"), stripEngine: $("#generationEngine"), orb: $("#thinkingOrb"),
+  strip: $("#generationStrip"), stripTitle: $("#generationTitle"), stripText: $("#generationText"), stripEngine: $("#generationEngine"), orb: $("#thinkingOrb"), cancelGeneration: $("#cancelGeneration"),
   generate: $("#generateButton"), generateIcon: $("#generateIcon"), generateText: $("#generateText"), transport: $("#transport"),
   audio: $("#resultAudio"), player: $("#audioPlayer"), playerPlay: $("#playerPlay"), playerCurrent: $("#playerCurrent"),
   playerDuration: $("#playerDuration"), waveform: $("#waveform"), volumeButton: $("#volumeButton"), volumePopover: $("#volumePopover"),
@@ -591,7 +596,8 @@ async function api(path, options={}){
   let r;
   try{
     r=await fetch(`${API}${path}`,{cache:"no-store",...options});
-  }catch{
+  }catch(networkError){
+    if(networkError?.name==="AbortError")throw networkError;
     throw new Error("No se pudo conectar con el motor local. Puede haberse detenido; reinicia Voice Studio AI.");
   }
   if(!r.ok){const b=await r.json().catch(()=>({}));throw new Error(b.detail||b.error||`HTTP ${r.status}`)}
@@ -1077,6 +1083,7 @@ function settingsPayload(){
 
 function setBusy(on){
   state.busy=on;updateGenerate();el.generate.classList.toggle("generating",on);el.orb.classList.toggle("thinking",on);
+  el.cancelGeneration.hidden=!on;
   if(on){
     el.strip.classList.add("visible");el.strip.classList.remove("success","error");el.generateIcon.innerHTML=`<span class="spinner"></span>`;el.generateText.textContent="Generando";
   }else{
@@ -1120,8 +1127,11 @@ async function generate(){
   if(!state.voice||!selectedModel()?.compatible||!el.script.value.trim())return;
   if(!selectedModel()?.installed){toast("Instala el modelo seleccionado antes de generar.","error");return}
   stopPreview();setBusy(true);pollStatus();
+  const requestId=crypto.randomUUID();
+  state.generationRequestId=requestId;
+  state.generationController=new AbortController();
   try{
-    const result=await api("/api/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(settingsPayload())});
+    const result=await api("/api/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...settingsPayload(),request_id:requestId}),signal:state.generationController.signal});
     const url=`${API}${result.url}`,name=result.filename;
     state.result=result;state.selectedSoundId="";
     await setResultAudio(url,name,state.voice.name);
@@ -1131,8 +1141,23 @@ async function generate(){
     el.stripText.textContent=`${result.model_name} · ${result.backend.toUpperCase()} · ${result.used_transcript?"ICL":"X-vector"}`;
     await refreshData();toast("Locución generada. Ahora puedes agregarle música desde el reproductor.","success");hideStrip(1450);
   }catch(e){
-    el.strip.classList.add("visible","error");el.stripTitle.textContent="No se pudo generar";el.stripText.textContent=e.message;toast(e.message,"error");hideStrip(4300);
-  }finally{clearInterval(state.statusTimer);state.statusTimer=null;setBusy(false)}
+    if(e.name==="AbortError"){
+      el.strip.classList.add("visible");el.strip.classList.remove("success","error");
+      el.stripTitle.textContent="Cancelado";el.stripText.textContent="Se canceló la generación.";
+      hideStrip(1800);
+    }else{
+      el.strip.classList.add("visible","error");el.stripTitle.textContent="No se pudo generar";el.stripText.textContent=e.message;toast(e.message,"error");hideStrip(4300);
+    }
+  }finally{
+    clearInterval(state.statusTimer);state.statusTimer=null;setBusy(false);
+    state.generationController=null;state.generationRequestId=null;
+  }
+}
+function cancelGeneration(){
+  const requestId=state.generationRequestId;
+  if(!requestId)return;
+  state.generationController?.abort();
+  api("/api/generate/cancel",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({request_id:requestId})}).catch(()=>{});
 }
 
 async function setResultAudio(url,filename,voiceName){
@@ -1233,6 +1258,7 @@ function isDesktop(){return Boolean(window.__TAURI_INTERNALS__)}
 let tauriInvokeFn=null;
 let tauriListenFn=null;
 let engineUnlisten=null;
+let engineCrashUnlisten=null;
 
 async function tauriInvoke(command,args={}){
   if(!isDesktop())return null;
@@ -1421,7 +1447,33 @@ async function initEngineBridge(){
   const event=await import("@tauri-apps/api/event");
   tauriListenFn=event.listen;
   engineUnlisten=await tauriListenFn("engine-install-progress",evt=>handleEngineProgress(evt.payload));
+  engineCrashUnlisten=await tauriListenFn("engine-crashed",()=>handleEngineCrash());
   state.engine.bridgeReady=true;
+}
+async function handleEngineCrash(){
+  if(state.engine.recovering)return;
+  state.engine.recovering=true;
+  if(state.generationController)cancelGeneration();
+  el.strip.classList.add("visible","error");el.strip.classList.remove("success");
+  el.stripTitle.textContent="Motor detenido";
+  el.stripText.textContent="El motor local se detuvo inesperadamente. Reiniciando…";
+  toast("El motor local se detuvo inesperadamente. Reiniciando…","error");
+  try{
+    await startTauriEngine();
+    if(!(await waitEngine()))throw new Error("El motor no respondió tras reiniciarlo.");
+    el.strip.classList.remove("error");el.strip.classList.add("success");
+    el.stripTitle.textContent="Motor reiniciado";
+    el.stripText.textContent="Ya puedes seguir generando.";
+    hideStrip(1800);
+    toast("Motor local reiniciado.","success");
+    await refreshData();
+  }catch{
+    el.stripTitle.textContent="No se pudo reiniciar el motor";
+    el.stripText.textContent="Cierra y vuelve a abrir Voice Studio AI.";
+    toast("No se pudo reiniciar el motor local. Cierra y vuelve a abrir la app.","error");
+  }finally{
+    state.engine.recovering=false;
+  }
 }
 async function installSelectedEngine(){
   const flavor=state.engine.selectedFlavor;
@@ -1622,7 +1674,7 @@ el.previewSound.onclick=()=>{
   if(id)preview(`${API}/api/sounds/${encodeURIComponent(id)}/audio`,el.previewSound);
 };
 $$(".tabs button").forEach(b=>b.onclick=()=>switchTab(b.dataset.tab));el.historySearch.oninput=renderHistory;el.clearHistory.onclick=async()=>{await api("/api/history",{method:"DELETE"});state.history=[];renderHistory();toast("Historial borrado.")};
-el.generate.onclick=generate;$$("#profileButtons button").forEach(b=>b.onclick=()=>applyProfile(b.dataset.profile));
+el.generate.onclick=generate;el.cancelGeneration.onclick=cancelGeneration;$$("#profileButtons button").forEach(b=>b.onclick=()=>applyProfile(b.dataset.profile));
 [el.speed,el.pitch].forEach(x=>x.oninput=()=>{syncLabels();state.profile="custom";$$("#profileButtons button").forEach(b=>b.classList.remove("active"));savePreferences()});
 [el.stability,el.style].forEach(x=>x.oninput=()=>{state.profile="custom";$$("#profileButtons button").forEach(b=>b.classList.remove("active"));savePreferences()});
 [el.output,el.mode].forEach(x=>x.onchange=savePreferences);

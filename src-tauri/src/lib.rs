@@ -33,6 +33,13 @@ const DOWNLOAD_PERCENT_SPAN: f64 = 92.0;
 
 struct EngineProcess(Mutex<Option<Child>>);
 
+// Set right before a deliberate stop/kill so the watchdog thread (see
+// spawn_engine_watchdog) can tell an intentional shutdown apart from the
+// engine process dying on its own (crash), which is the case it should
+// alert the frontend about.
+#[derive(Default)]
+struct EngineExpectedStop(AtomicBool);
+
 struct EngineInstallState {
     cancel: Arc<AtomicBool>,
     running: Mutex<bool>,
@@ -1063,7 +1070,11 @@ fn cancel_engine_install(install_state: State<EngineInstallState>) {
 }
 
 #[tauri::command]
-fn start_engine(app: AppHandle, state: State<EngineProcess>) -> Result<String, String> {
+fn start_engine(
+    app: AppHandle,
+    state: State<EngineProcess>,
+    expected_stop: State<EngineExpectedStop>,
+) -> Result<String, String> {
     let mut guard = state
         .0
         .lock()
@@ -1080,7 +1091,54 @@ fn start_engine(app: AppHandle, state: State<EngineProcess>) -> Result<String, S
 
     let child = spawn_engine(&app)?;
     *guard = Some(child);
+    drop(guard);
+
+    expected_stop.0.store(false, Ordering::Relaxed);
+    spawn_engine_watchdog(app.clone());
+
     Ok("started".into())
+}
+
+// Polls the spawned engine process every couple seconds. If it disappears
+// without a prior deliberate stop/uninstall (EngineExpectedStop), it means
+// the Python process crashed on its own — tell the frontend so it can offer
+// (or attempt) a restart instead of the user just seeing requests time out.
+fn spawn_engine_watchdog(app: AppHandle) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_secs(2));
+
+        let exited: Option<Option<i32>> = {
+            let state = app.state::<EngineProcess>();
+            let Ok(mut guard) = state.0.lock() else {
+                return;
+            };
+            match guard.as_mut() {
+                None => return, // stopped or replaced by a newer start_engine call
+                Some(child) => match child.try_wait() {
+                    Ok(None) => None,
+                    Ok(Some(status)) => {
+                        *guard = None;
+                        Some(status.code())
+                    }
+                    Err(_) => {
+                        *guard = None;
+                        Some(None)
+                    }
+                },
+            }
+        };
+
+        if let Some(code) = exited {
+            let was_expected = app
+                .state::<EngineExpectedStop>()
+                .0
+                .swap(false, Ordering::Relaxed);
+            if !was_expected {
+                let _ = app.emit("engine-crashed", code);
+            }
+            return;
+        }
+    });
 }
 
 fn take_engine_child(state: &EngineProcess) -> Result<Option<Child>, String> {
@@ -1092,7 +1150,8 @@ fn take_engine_child(state: &EngineProcess) -> Result<Option<Child>, String> {
     Ok(guard.take())
 }
 
-fn terminate_engine(state: &EngineProcess) -> Result<(), String> {
+fn terminate_engine(state: &EngineProcess, expected_stop: &EngineExpectedStop) -> Result<(), String> {
+    expected_stop.0.store(true, Ordering::Relaxed);
     if let Some(mut child) = take_engine_child(state)? {
         let _ = child.kill();
         let _ = child.wait();
@@ -1101,13 +1160,17 @@ fn terminate_engine(state: &EngineProcess) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn stop_engine(state: State<EngineProcess>) -> Result<(), String> {
-    terminate_engine(state.inner())
+fn stop_engine(state: State<EngineProcess>, expected_stop: State<EngineExpectedStop>) -> Result<(), String> {
+    terminate_engine(state.inner(), expected_stop.inner())
 }
 
 #[tauri::command]
-fn uninstall_engine(_app: AppHandle, process: State<EngineProcess>) -> Result<(), String> {
-    terminate_engine(process.inner())?;
+fn uninstall_engine(
+    _app: AppHandle,
+    process: State<EngineProcess>,
+    expected_stop: State<EngineExpectedStop>,
+) -> Result<(), String> {
+    terminate_engine(process.inner(), expected_stop.inner())?;
 
     #[cfg(not(debug_assertions))]
     {
@@ -1124,6 +1187,7 @@ fn uninstall_engine(_app: AppHandle, process: State<EngineProcess>) -> Result<()
 pub fn run() {
     tauri::Builder::default()
         .manage(EngineProcess(Mutex::new(None)))
+        .manage(EngineExpectedStop::default())
         .manage(EngineInstallState::default())
         .invoke_handler(tauri::generate_handler![
             detect_hardware,
@@ -1138,8 +1202,9 @@ pub fn run() {
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {
                 let state = window.state::<EngineProcess>();
+                let expected_stop = window.state::<EngineExpectedStop>();
 
-                if let Err(error) = terminate_engine(state.inner()) {
+                if let Err(error) = terminate_engine(state.inner(), expected_stop.inner()) {
                     eprintln!("No se pudo cerrar el motor local: {error}");
                 }
             }
