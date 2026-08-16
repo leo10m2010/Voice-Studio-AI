@@ -23,7 +23,7 @@ use zip::ZipArchive;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
-const ENGINE_MANIFEST_URL: &str = "https://github.com/leo10m2010/Voice-Studio-AI/releases/download/engine-v1.0.2/engine-manifest.json";
+const ENGINE_MANIFEST_URL: &str = "https://github.com/leo10m2010/Voice-Studio-AI/releases/download/engine-v1.0.3/engine-manifest.json";
 const ENGINE_PORT: &str = "8765";
 // Percent budget for downloading+verifying+installing all parts, combined and
 // byte-weighted, so the bar advances by actual size instead of by part count
@@ -121,6 +121,18 @@ struct EngineCatalog {
 }
 
 #[derive(Debug, Clone, Serialize)]
+struct EngineDiagnostics {
+    app_version: String,
+    status: EngineStatus,
+    hardware: HardwareInfo,
+    engine_root: String,
+    manifest_source: String,
+    log_path: String,
+    log_tail: String,
+    last_install_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 struct EngineProgress {
     stage: String,
     message: String,
@@ -193,6 +205,37 @@ fn read_install_record(app: &AppHandle) -> Option<EngineInstallRecord> {
     let path = install_record_path(app).ok()?;
     let content = fs::read_to_string(path).ok()?;
     serde_json::from_str(&content).ok()
+}
+
+fn engine_log_path(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(app_engine_root(app)?.join("engine.log"))
+}
+
+/// Opens a fresh log for the engine we are about to spawn, keeping the
+/// previous run as `engine.prev.log`. Without this the engine's stdout/stderr
+/// went to `Stdio::null()`, which made every failure on a user's machine
+/// (missing DLL, busy port, crashing import) indistinguishable from "the app
+/// just doesn't work".
+#[cfg(not(debug_assertions))]
+fn open_engine_log(app: &AppHandle) -> Result<File, String> {
+    let path = engine_log_path(app)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    if path.exists() {
+        let _ = fs::rename(&path, path.with_file_name("engine.prev.log"));
+    }
+    File::create(&path).map_err(|error| {
+        format!("No se pudo crear el registro del motor en {}: {error}", path.display())
+    })
+}
+
+fn tail_of(path: &Path, max_bytes: usize) -> String {
+    let Ok(content) = fs::read(path) else {
+        return String::new();
+    };
+    let start = content.len().saturating_sub(max_bytes);
+    String::from_utf8_lossy(&content[start..]).into_owned()
 }
 
 fn engine_running(state: &EngineProcess) -> bool {
@@ -288,7 +331,10 @@ fn detect_hardware_value() -> HardwareInfo {
                         .filter(|x| !x.is_empty())
                         .map(|x| x.to_string());
                     let vram_gb = vram_mb.map(|mb| mb / 1024.0);
-                    let recommended_flavor = if vram_gb.unwrap_or(0.0) >= 5.5 {
+                    // Igual que VRAM_REQUIRED_GB en el motor: el 0.6B entra
+                    // en ~2 GB en fp16, así que una tarjeta de 4 GB merece el
+                    // runtime CUDA en vez del de CPU.
+                    let recommended_flavor = if vram_gb.unwrap_or(0.0) >= 2.5 {
                         "nvidia"
                     } else {
                         "cpu"
@@ -918,11 +964,14 @@ fn spawn_engine(_app: &AppHandle) -> Result<Child, String> {
             return Err("ENGINE_NOT_INSTALLED".into());
         }
 
+        let log = open_engine_log(app)?;
+        let log_err = log.try_clone().map_err(|error| error.to_string())?;
+
         let mut command = hidden_command(executable);
         command
             .env("QWEN_ENGINE_PORT", ENGINE_PORT)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            .stdout(Stdio::from(log))
+            .stderr(Stdio::from(log_err));
 
         if let Ok(resource_dir) = app.path().resource_dir() {
             command.env("QWEN_STUDIO_ROOT", resource_dir);
@@ -933,13 +982,31 @@ fn spawn_engine(_app: &AppHandle) -> Result<Child, String> {
 }
 
 #[tauri::command]
-fn detect_hardware() -> HardwareInfo {
-    detect_hardware_value()
-}
-
-#[tauri::command]
 fn engine_status(app: AppHandle, process: State<EngineProcess>) -> Result<EngineStatus, String> {
     engine_status_value(&app, process.inner())
+}
+
+/// Everything needed to explain a failure on a machine we cannot inspect,
+/// in one copyable payload: what is installed, what hardware was detected,
+/// and the tail of the engine's own output.
+#[tauri::command]
+fn engine_diagnostics(
+    app: AppHandle,
+    process: State<EngineProcess>,
+) -> Result<EngineDiagnostics, String> {
+    let root = app_engine_root(&app)?;
+    let log_path = engine_log_path(&app)?;
+
+    Ok(EngineDiagnostics {
+        app_version: env!("CARGO_PKG_VERSION").to_string(),
+        status: engine_status_value(&app, process.inner())?,
+        hardware: detect_hardware_value(),
+        engine_root: root.display().to_string(),
+        manifest_source: manifest_source(),
+        log_tail: tail_of(&log_path, 16 * 1024),
+        log_path: log_path.display().to_string(),
+        last_install_error: fs::read_to_string(root.join("last-install-error.log")).ok(),
+    })
 }
 
 #[tauri::command]
@@ -1160,11 +1227,6 @@ fn terminate_engine(state: &EngineProcess, expected_stop: &EngineExpectedStop) -
 }
 
 #[tauri::command]
-fn stop_engine(state: State<EngineProcess>, expected_stop: State<EngineExpectedStop>) -> Result<(), String> {
-    terminate_engine(state.inner(), expected_stop.inner())
-}
-
-#[tauri::command]
 fn uninstall_engine(
     _app: AppHandle,
     process: State<EngineProcess>,
@@ -1190,13 +1252,12 @@ pub fn run() {
         .manage(EngineExpectedStop::default())
         .manage(EngineInstallState::default())
         .invoke_handler(tauri::generate_handler![
-            detect_hardware,
             engine_status,
+            engine_diagnostics,
             engine_catalog,
             install_engine,
             cancel_engine_install,
             start_engine,
-            stop_engine,
             uninstall_engine
         ])
         .on_window_event(|window, event| {

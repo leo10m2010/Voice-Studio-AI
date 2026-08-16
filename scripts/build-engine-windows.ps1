@@ -24,6 +24,10 @@ if ($LASTEXITCODE -ne 0) { throw "No se pudo instalar PyInstaller." }
 
 if (Test-Path "engine\build") { Remove-Item "engine\build" -Recurse -Force }
 if (Test-Path $engineFolder) { Remove-Item $engineFolder -Recurse -Force }
+# A .spec left over from an earlier run can carry excludes this script no
+# longer passes (that is how 'sklearn' stayed excluded after the flag was
+# dropped). PyInstaller regenerates it from the flags below.
+Get-ChildItem "engine\*.spec" -ErrorAction SilentlyContinue | Remove-Item -Force
 New-Item -ItemType Directory -Force -Path $output | Out-Null
 
 powershell -ExecutionPolicy Bypass -File ".\scripts\prepare-qwen-vendor.ps1" -PythonExe $py | Out-Host
@@ -52,6 +56,11 @@ try {
         --specpath engine `
         --paths "$vendorRoot" `
         --collect-data qwen_tts `
+        --collect-submodules sklearn.decomposition `
+        --collect-submodules sklearn.cluster `
+        --collect-submodules sklearn.feature_extraction `
+        --collect-submodules sklearn.neighbors `
+        --hidden-import sklearn `
         --hidden-import qwen_tts.inference.qwen3_tts_model `
         --hidden-import qwen_tts.inference.qwen3_tts_tokenizer `
         --hidden-import qwen_tts.core.models.configuration_qwen3_tts `

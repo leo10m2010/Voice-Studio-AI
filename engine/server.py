@@ -14,8 +14,6 @@ import uuid
 from pathlib import Path
 from typing import Literal, Optional
 from datetime import datetime, timezone
-from urllib.request import Request, urlopen
-from urllib.parse import quote
 
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
@@ -26,10 +24,25 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from audio_mix import mix_voice_with_music
-from audio_ingest import transcode_music_to_wav, validate_canonical_music
+from audio_ingest import (
+    decode_audio_file,
+    transcode_music_to_wav,
+    validate_canonical_music,
+)
 from model_install import ModelInstallRegistry
 
 DEFAULT_MODEL_ID = "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
+
+# VRAM mínima para correr el modelo en fp16, con margen para el tokenizer 12Hz,
+# la caché KV y las activaciones. El 0.6B pesa ~1.2 GB en fp16; pedir 5.5 GB
+# mandaba a CPU tarjetas de 4 GB que lo corren de sobra, y en CPU este modelo
+# va ~11x más lento que tiempo real. Si aun así no entra, choose_backend()
+# reintenta en CPU al detectar OOM, así que quedarse corto no rompe nada.
+VRAM_REQUIRED_GB = {
+    "Qwen/Qwen3-TTS-12Hz-0.6B-Base": 2.5,
+    "Qwen/Qwen3-TTS-12Hz-1.7B-Base": 5.0,
+}
+DEFAULT_VRAM_REQUIRED_GB = 2.5
 
 SUPPORTED_MODELS = {
     "Qwen/Qwen3-TTS-12Hz-0.6B-Base": {
@@ -39,7 +52,7 @@ SUPPORTED_MODELS = {
         "engine": "qwen",
         "recommended": True,
         "disk_gb": 2.52,
-        "gpu_vram_recommended_gb": 5.5,
+        "gpu_vram_recommended_gb": 2.5,
         "description": "Recomendado. Mejor equilibrio para este equipo y clonación local.",
         "license": "apache-2.0",
         "spanish": True,
@@ -51,41 +64,13 @@ SUPPORTED_MODELS = {
         "engine": "qwen",
         "recommended": False,
         "disk_gb": 4.54,
-        "gpu_vram_recommended_gb": 10.0,
+        "gpu_vram_recommended_gb": 5.0,
         "description": "Más pesado. Puede mejorar calidad, pero requiere bastante más memoria.",
         "license": "apache-2.0",
         "spanish": True,
     },
 }
 
-CURATED_DISCOVERY_MODELS = [
-    {
-        "id": "ResembleAI/Chatterbox-Multilingual-es-mx-latam",
-        "name": "Chatterbox Multilingual · Español LatAm",
-        "author": "ResembleAI",
-        "family": "Chatterbox V3",
-        "engine": "chatterbox",
-        "recommended": False,
-        "description": "Modelo dedicado a español latinoamericano con voice cloning.",
-        "license": "mit",
-        "spanish": True,
-        "compatible": False,
-        "compatibility_note": "Requiere adaptador Chatterbox; no usa la API de Qwen.",
-    },
-    {
-        "id": "myshell-ai/OpenVoiceV2",
-        "name": "OpenVoice V2",
-        "author": "myshell-ai",
-        "family": "OpenVoice",
-        "engine": "openvoice",
-        "recommended": False,
-        "description": "Clonación de timbre multilingüe con soporte nativo de español.",
-        "license": "mit",
-        "spanish": True,
-        "compatible": False,
-        "compatibility_note": "Requiere adaptador OpenVoice; no usa la API de Qwen.",
-    },
-]
 PORT = int(os.environ.get("QWEN_ENGINE_PORT", "8765"))
 
 PROJECT_ROOT = Path(
@@ -110,6 +95,7 @@ PREPARED_DIR = DATA_ROOT / "prepared_voices"
 VOICE_META_DIR = DATA_ROOT / "voice_meta"
 HF_HOME = DATA_ROOT / "huggingface"
 HISTORY_PATH = DATA_ROOT / "history.json"
+SEEDED_SOUNDS_PATH = DATA_ROOT / "seeded_sounds.json"
 
 for directory in (
     VOICES_DIR,
@@ -129,11 +115,6 @@ MODEL_INSTALLER = ModelInstallRegistry(HF_HOME, SUPPORTED_MODELS)
 
 ALLOWED_AUDIO = {".wav", ".mp3", ".flac", ".ogg"}
 MAX_UPLOAD_MB = 80
-FETCH_REMOTE_AVATARS = os.environ.get("QWEN_STUDIO_FETCH_AVATARS", "0").lower() in {
-    "1",
-    "true",
-    "yes",
-}
 
 app = FastAPI(title="Qwen Voice Studio Local Engine", version="0.1.0")
 app.add_middleware(
@@ -151,57 +132,6 @@ app.add_middleware(
 )
 
 
-_HF_AVATAR_CACHE: dict[str, Optional[str]] = {}
-_HF_SEARCH_CACHE: dict[str, tuple[float, list[dict]]] = {}
-
-
-def fetch_json_url(url: str, timeout: float = 6.0):
-    request = Request(
-        url,
-        headers={
-            "User-Agent": "VoiceStudioAI/0.6",
-            "Accept": "application/json",
-        },
-    )
-    with urlopen(request, timeout=timeout) as response:
-        return json.load(response)
-
-
-def huggingface_author_avatar(author: str) -> Optional[str]:
-    """
-    Hugging Face exposes public user/org overview endpoints with avatarUrl.
-    The lookup is best-effort so the app remains usable offline.
-    """
-    if not author:
-        return None
-    if author in _HF_AVATAR_CACHE:
-        return _HF_AVATAR_CACHE[author]
-
-    # Avatars are decorative. Do not make the local app wait on Hugging Face
-    # during startup or every refresh when the user is offline. Set
-    # QWEN_STUDIO_FETCH_AVATARS=1 to opt into the best-effort lookup.
-    if not FETCH_REMOTE_AVATARS:
-        _HF_AVATAR_CACHE[author] = None
-        return None
-
-    value = None
-    encoded = quote(author, safe="")
-    for endpoint in (
-        f"https://huggingface.co/api/organizations/{encoded}/overview",
-        f"https://huggingface.co/api/users/{encoded}/overview",
-    ):
-        try:
-            data = fetch_json_url(endpoint)
-            value = data.get("avatarUrl") or data.get("avatar_url")
-            if value:
-                break
-        except Exception:
-            continue
-
-    _HF_AVATAR_CACHE[author] = value
-    return value
-
-
 def supported_model_payload(model_id: str) -> dict:
     info = dict(SUPPORTED_MODELS[model_id])
     install = MODEL_INSTALLER.get_state(model_id)
@@ -210,7 +140,6 @@ def supported_model_payload(model_id: str) -> dict:
             "id": model_id,
             "compatible": True,
             "compatibility_note": "Compatible con el motor Qwen integrado.",
-            "avatar_url": huggingface_author_avatar(info.get("author", "")),
             "hub_url": f"https://huggingface.co/{model_id}",
             "installed": install["installed"],
             "install_state": install["state"],
@@ -221,87 +150,6 @@ def supported_model_payload(model_id: str) -> dict:
         }
     )
     return info
-
-
-def discover_engine_family(model_id: str, tags: list[str]) -> tuple[str, str]:
-    text = (model_id + " " + " ".join(tags)).lower()
-    if "qwen3-tts" in text:
-        return "qwen", "Qwen3-TTS"
-    if "chatterbox" in text:
-        return "chatterbox", "Chatterbox"
-    if "openvoice" in text:
-        return "openvoice", "OpenVoice"
-    if "xtts" in text:
-        return "xtts", "XTTS"
-    return "unknown", "TTS"
-
-
-def search_huggingface_models(query: str, limit: int = 16) -> list[dict]:
-    query = (query or "").strip()
-    if not query:
-        return []
-
-    key = query.lower()
-    cached = _HF_SEARCH_CACHE.get(key)
-    if cached and time.time() - cached[0] < 120:
-        return cached[1]
-
-    try:
-        from huggingface_hub import HfApi
-
-        api = HfApi()
-        models = api.list_models(
-            search=query,
-            filter="text-to-speech",
-            sort="downloads",
-            direction=-1,
-            limit=max(limit * 2, 20),
-            full=True,
-        )
-
-        results = []
-        for model in models:
-            model_id = getattr(model, "id", None) or getattr(model, "modelId", None)
-            if not model_id:
-                continue
-
-            tags = list(getattr(model, "tags", None) or [])
-            author = getattr(model, "author", None) or model_id.split("/", 1)[0]
-            engine, family = discover_engine_family(model_id, tags)
-            compatible = model_id in SUPPORTED_MODELS
-
-            results.append(
-                {
-                    "id": model_id,
-                    "name": model_id.split("/")[-1],
-                    "author": author,
-                    "family": family,
-                    "engine": engine,
-                    "recommended": bool(
-                        SUPPORTED_MODELS.get(model_id, {}).get("recommended")
-                    ),
-                    "compatible": compatible,
-                    "compatibility_note": (
-                        "Compatible con el motor Qwen integrado."
-                        if compatible
-                        else f"Descubierto en Hugging Face. Requiere adaptador {family}."
-                    ),
-                    "description": "",
-                    "license": None,
-                    "spanish": ("es" in tags or "spanish" in tags),
-                    "downloads": getattr(model, "downloads", None),
-                    "likes": getattr(model, "likes", None),
-                    "avatar_url": huggingface_author_avatar(author),
-                    "hub_url": f"https://huggingface.co/{model_id}",
-                }
-            )
-            if len(results) >= limit:
-                break
-    except Exception:
-        results = []
-
-    _HF_SEARCH_CACHE[key] = (time.time(), results)
-    return results
 
 
 def safe_filename(name: str) -> str:
@@ -320,6 +168,16 @@ def transcript_path(audio_path: Path) -> Path:
 
 
 def copy_seed_assets() -> None:
+    """
+    Seeds the user library from the bundled assets.
+
+    Transcoding the bundled MP3 music is expensive (tens of MB through
+    librosa). This MUST NOT run on the import path: until it finishes the
+    HTTP port is not open, the desktop shell's health check times out, and
+    the user gets an app that loads with no voices, no models and a dead
+    Generate button. It is started in the background once uvicorn is
+    already accepting requests. See warm_up_library().
+    """
     voice_dir = PROJECT_ROOT / "assets" / "voice"
     sound_dir = PROJECT_ROOT / "assets" / "sonidos"
 
@@ -338,45 +196,244 @@ def copy_seed_assets() -> None:
             except OSError:
                 pass
 
-    if sound_dir.exists():
-        for source in sound_dir.iterdir():
-            if not source.is_file() or source.suffix.lower() not in ALLOWED_AUDIO:
-                continue
+    if not sound_dir.exists():
+        return
 
-            # The bundled library is published as MP3, while the mixer and
-            # validator expect canonical WAV files. Convert seeds once so the
-            # built-in music is usable immediately after first launch.
-            canonical = SOUNDS_DIR / f"{source.stem}.wav"
-            if canonical.exists():
-                continue
+    # The bundled library ships as MP3 while the mixer and validator expect
+    # canonical WAV, so each seed is transcoded once. Which seeds are already
+    # done is recorded explicitly instead of being guessed from the resulting
+    # file name: transcode_music_to_wav() renames on collision, so a seed could
+    # land as "Alegria_2_2.wav" while the guard kept looking for "Alegria_2.wav"
+    # — and re-transcoded the same track on every single launch, growing the
+    # library (and startup time) without bound.
+    seeded = set()
+    if SEEDED_SOUNDS_PATH.exists():
+        try:
+            seeded = set(json.loads(SEEDED_SOUNDS_PATH.read_text(encoding="utf-8")))
+        except Exception:
+            seeded = set()
+    else:
+        # First run after the fix: a library seeded by an older build has no
+        # marker yet. Recover it from the sidecars each import already writes,
+        # so existing users do not get one final round of duplicates.
+        for sidecar in SOUNDS_DIR.glob("*.meta.json"):
             try:
-                transcode_music_to_wav(
-                    source_path=source,
-                    destination_dir=SOUNDS_DIR,
-                    original_name=source.name,
-                    target_sr=44100,
-                )
+                name = json.loads(sidecar.read_text(encoding="utf-8")).get("source_name")
             except Exception:
-                # Keep the original available for the repair action if a
-                # codec is unavailable in a reduced installation.
-                try:
-                    shutil.copy2(source, SOUNDS_DIR / source.name)
-                except OSError:
-                    pass
+                continue
+            if name:
+                seeded.add(name)
+
+    changed = False
+    for source in sorted(sound_dir.iterdir()):
+        if not source.is_file() or source.suffix.lower() not in ALLOWED_AUDIO:
+            continue
+        if source.name in seeded:
+            continue
+        try:
+            transcode_music_to_wav(
+                source_path=source,
+                destination_dir=SOUNDS_DIR,
+                original_name=source.name,
+                target_sr=44100,
+            )
+        except Exception as exc:
+            # Copying the undecodable original into the library would only add
+            # a track the mixer rejects. Skip it and say why.
+            print(f"[seed] no se pudo preparar {source.name}: {exc}")
+            continue
+        seeded.add(source.name)
+        changed = True
+
+    if changed:
+        SEEDED_SOUNDS_PATH.write_text(
+            json.dumps(sorted(seeded), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
 
 
-copy_seed_assets()
+class LibraryWarmUp:
+    """
+    Tracks the one-time background preparation of the local library.
+
+    Reference preparation (resample + trim + analysis) costs a librosa decode
+    per voice. Doing it inline inside GET /api/voices made the very first
+    refresh block for as long as it took to process every seeded voice. The
+    listing now serves whatever is already cached and reports `analyzing`
+    for the rest, while this warm-up fills the cache in the background.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._pending: set[str] = set()
+        self._seeding = True
+        self._started = False
+
+    def start(self) -> None:
+        with self._lock:
+            if self._started:
+                return
+            self._started = True
+        threading.Thread(target=self._run, name="library-warm-up", daemon=True).start()
+
+    def _run(self) -> None:
+        try:
+            copy_seed_assets()
+        except Exception as exc:
+            print(f"[warm-up] no se pudieron copiar los recursos incluidos: {exc}")
+        finally:
+            with self._lock:
+                self._seeding = False
+
+        try:
+            removed = prune_orphan_outputs()
+            if removed:
+                print(f"[warm-up] {removed} audio(s) sin referencia eliminados")
+        except Exception as exc:
+            print(f"[warm-up] no se pudo limpiar outputs: {exc}")
+
+        for path in sorted(VOICES_DIR.iterdir()):
+            if not path.is_file() or path.suffix.lower() not in ALLOWED_AUDIO:
+                continue
+            if self._claim(path):
+                self._prepare(path)
+
+        preload_model_if_affordable()
+
+    def _claim(self, audio_path: Path) -> bool:
+        """Reserve a voice so two threads never analyze the same file."""
+        with self._lock:
+            if audio_path.stem in self._pending:
+                return False
+            self._pending.add(audio_path.stem)
+            return True
+
+    def _prepare(self, audio_path: Path) -> None:
+        try:
+            prepare_reference_audio(audio_path, force=False)
+        except Exception as exc:
+            print(f"[warm-up] no se pudo preparar {audio_path.name}: {exc}")
+        finally:
+            with self._lock:
+                self._pending.discard(audio_path.stem)
+
+    def schedule(self, audio_path: Path) -> None:
+        if not self._claim(audio_path):
+            return
+        threading.Thread(
+            target=self._prepare,
+            args=(audio_path,),
+            name=f"prepare-{audio_path.stem[:16]}",
+            daemon=True,
+        ).start()
+
+    @property
+    def busy(self) -> bool:
+        with self._lock:
+            return self._seeding or bool(self._pending)
+
+
+WARM_UP = LibraryWarmUp()
+
+# Loading the model costs ~34 s on a slow CPU and the clone prompt another ~9 s.
+# Paid on the first Generate, that is 43 s of the user staring at a spinner.
+# Paid right after startup, it lands while they are still writing the script.
+PRELOAD_ENABLED = os.environ.get("QWEN_STUDIO_PRELOAD", "1").lower() not in {
+    "0",
+    "false",
+    "no",
+}
+# The model needs ~2.5 GB resident. Holding that on a machine that is already
+# short on memory would trade a faster first render for a slower everything,
+# so the preload only happens when there is comfortable headroom.
+PRELOAD_MIN_FREE_GB = 4.0
+
+
+def available_memory_gb() -> Optional[float]:
+    if os.name != "nt":
+        try:
+            return os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE") / 1024**3
+        except (ValueError, OSError, AttributeError):
+            return None
+    import ctypes
+
+    class MemoryStatusEx(ctypes.Structure):
+        _fields_ = [
+            ("dwLength", ctypes.c_ulong),
+            ("dwMemoryLoad", ctypes.c_ulong),
+            ("ullTotalPhys", ctypes.c_ulonglong),
+            ("ullAvailPhys", ctypes.c_ulonglong),
+            ("ullTotalPageFile", ctypes.c_ulonglong),
+            ("ullAvailPageFile", ctypes.c_ulonglong),
+            ("ullTotalVirtual", ctypes.c_ulonglong),
+            ("ullAvailVirtual", ctypes.c_ulonglong),
+            ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+        ]
+
+    status = MemoryStatusEx()
+    status.dwLength = ctypes.sizeof(MemoryStatusEx)
+    try:
+        if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            return None
+    except Exception:
+        return None
+    return status.ullAvailPhys / 1024**3
+
+
+def preload_model_if_affordable() -> None:
+    """Warms the model so the first generation does not pay for loading it."""
+    if not PRELOAD_ENABLED:
+        return
+    if MODEL_INSTALLER.cached_snapshot(DEFAULT_MODEL_ID) is None:
+        return
+
+    free = available_memory_gb()
+    if free is not None and free < PRELOAD_MIN_FREE_GB:
+        print(f"[preload] omitido: solo {free:.1f} GB de RAM libre")
+        return
+
+    try:
+        started = time.perf_counter()
+        MODEL_MANAGER.load("auto", DEFAULT_MODEL_ID)
+        print(f"[preload] modelo listo en {time.perf_counter() - started:.1f} s")
+    except Exception as exc:
+        # Preloading is an optimization. A failure here must not stop the
+        # engine; the real load happens again on the first generation.
+        print(f"[preload] no se pudo precargar el modelo: {exc}")
 
 
 class EngineStatus:
+    """
+    What the engine is doing right now.
+
+    Generation runs ~11x slower than real time on a CPU, so a 10-second spot is
+    a 100-second wait. Reporting only "generando" for that long reads as a
+    frozen app. This also carries which chunk is in flight and how long the
+    request has been running, so the UI can show honest progress.
+    """
+
+    IDLE = {
+        "stage": "idle",
+        "title": "Motor listo",
+        "message": "Esperando una generación.",
+        "backend": None,
+        "chunk_index": 0,
+        "chunk_count": 0,
+        "elapsed_seconds": 0.0,
+    }
+
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._data = {
-            "stage": "idle",
-            "title": "Motor listo",
-            "message": "Esperando una generación.",
-            "backend": None,
-        }
+        self._data = dict(self.IDLE)
+        self._started_at: Optional[float] = None
+
+    def start_request(self) -> None:
+        with self._lock:
+            self._started_at = time.perf_counter()
+
+    def end_request(self) -> None:
+        with self._lock:
+            self._started_at = None
 
     def set(
         self,
@@ -384,6 +441,8 @@ class EngineStatus:
         title: str,
         message: str,
         backend: Optional[str] = None,
+        chunk_index: int = 0,
+        chunk_count: int = 0,
     ) -> None:
         with self._lock:
             self._data = {
@@ -391,11 +450,19 @@ class EngineStatus:
                 "title": title,
                 "message": message,
                 "backend": backend,
+                "chunk_index": chunk_index,
+                "chunk_count": chunk_count,
             }
 
     def get(self) -> dict:
         with self._lock:
-            return dict(self._data)
+            data = dict(self._data)
+            data["elapsed_seconds"] = (
+                round(time.perf_counter() - self._started_at, 1)
+                if self._started_at is not None
+                else 0.0
+            )
+            return data
 
 
 STATUS = EngineStatus()
@@ -451,7 +518,9 @@ def torch_info() -> dict:
                     "vram_gb": round(vram_gb, 2),
                     "compute_capability": f"{capability[0]}.{capability[1]}",
                     # Conservative threshold for the official PyTorch model.
-                    "recommended_mode": "cuda" if vram_gb >= 5.5 else "cpu",
+                    "recommended_mode": (
+                        "cuda" if vram_gb >= DEFAULT_VRAM_REQUIRED_GB else "cpu"
+                    ),
                 }
             )
         return result
@@ -468,6 +537,54 @@ def torch_info() -> dict:
             "recommended_mode": "cpu",
         }
 
+
+
+_THREADS_TUNED = False
+
+
+def tune_cpu_threads() -> None:
+    """
+    Pins torch to physical cores.
+
+    Transformer decode is memory-bandwidth bound, so the extra logical cores of
+    hyperthreading mostly add contention. Frozen builds can also misdetect the
+    topology entirely, which is worse. Setting it once, explicitly, avoids both.
+    """
+    global _THREADS_TUNED
+    if _THREADS_TUNED:
+        return
+    _THREADS_TUNED = True
+
+    try:
+        import torch
+
+        physical = os.cpu_count() or 1
+        if os.name == "nt":
+            try:
+                import subprocess
+
+                output = subprocess.run(
+                    ["wmic", "cpu", "get", "NumberOfCores"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                cores = [
+                    int(line)
+                    for line in output.stdout.split()
+                    if line.strip().isdigit()
+                ]
+                if cores:
+                    physical = sum(cores)
+            except Exception:
+                pass
+
+        threads = max(1, min(physical, os.cpu_count() or 1))
+        torch.set_num_threads(threads)
+        print(f"[torch] hilos fijados a {threads} (núcleos físicos detectados)")
+    except Exception as exc:
+        print(f"[torch] no se pudo ajustar los hilos: {exc}")
 
 
 def clamp(value: float, low: float, high: float) -> float:
@@ -784,25 +901,54 @@ def prepare_reference_audio(audio_path: Path, force: bool = False) -> tuple[Path
     return out, metadata
 
 
-def get_voice_reference_info(audio_path: Path) -> dict:
+def cached_reference_info(audio_path: Path) -> Optional[dict]:
+    """Return the stored analysis only when it is still valid — never decode."""
+    transcript = ""
+    sidecar = transcript_path(audio_path)
+    if sidecar.exists():
+        transcript = sidecar.read_text(encoding="utf-8", errors="ignore").strip()
+
+    meta_file = voice_meta_path(audio_path)
+    if not meta_file.exists() or not prepared_voice_path(audio_path).exists():
+        return None
+
     try:
-        _, metadata = prepare_reference_audio(audio_path, force=False)
-        return metadata
-    except Exception as exc:
-        transcript = ""
-        sidecar = transcript_path(audio_path)
-        if sidecar.exists():
-            transcript = sidecar.read_text(encoding="utf-8", errors="ignore").strip()
-        analysis = analyze_reference_audio(audio_path, transcript)
-        return {
-            "quality_score": analysis["quality_score"],
-            "quality_label": analysis["quality_label"],
-            "notes": analysis["notes"],
-            "original": analysis,
-            "prepared_analysis": analysis,
-            "has_transcript": bool(transcript),
-            "transcript": transcript,
-        }
+        cached = json.loads(meta_file.read_text(encoding="utf-8"))
+        if cached.get("signature") == reference_cache_signature(audio_path, transcript):
+            return cached
+    except Exception:
+        pass
+    return None
+
+
+def get_voice_reference_info(audio_path: Path) -> dict:
+    """
+    Listing-safe reference info.
+
+    Only cached results are returned. A cache miss schedules the analysis in
+    the background and reports it as pending, so listing the library never
+    costs a librosa decode per voice.
+    """
+    cached = cached_reference_info(audio_path)
+    if cached is not None:
+        return cached
+
+    WARM_UP.schedule(audio_path)
+    transcript = ""
+    sidecar = transcript_path(audio_path)
+    if sidecar.exists():
+        transcript = sidecar.read_text(encoding="utf-8", errors="ignore").strip()
+
+    return {
+        "analyzing": True,
+        "quality_score": 0,
+        "quality_label": "Analizando…",
+        "notes": ["Analizando la referencia en segundo plano."],
+        "original": {},
+        "prepared_analysis": {},
+        "has_transcript": bool(transcript),
+        "transcript": transcript,
+    }
 
 
 def split_text_for_tts(text: str, max_chars: int = 460) -> list[str]:
@@ -891,6 +1037,38 @@ def add_history_item(item: dict) -> None:
     items = load_history()
     items.insert(0, item)
     save_history(items)
+    # save_history() keeps only the newest 150 entries, so older renders stop
+    # being reachable at that point. Drop their files too.
+    prune_orphan_outputs(items[:150])
+
+
+def prune_orphan_outputs(items: Optional[list[dict]] = None) -> int:
+    """
+    Deletes renders no history entry points at any more.
+
+    Every generation and every music change writes a new file, and clearing the
+    history used to leave all of them behind, so `outputs/` grew forever.
+    """
+    if items is None:
+        items = load_history()
+
+    referenced = set()
+    for item in items:
+        for key in ("filename", "dry_filename"):
+            name = item.get(key)
+            if name:
+                referenced.add(str(name))
+
+    removed = 0
+    for path in OUTPUTS_DIR.iterdir():
+        if not path.is_file() or path.name in referenced:
+            continue
+        try:
+            path.unlink()
+            removed += 1
+        except OSError:
+            continue
+    return removed
 
 
 class ModelManager:
@@ -926,7 +1104,10 @@ class ModelManager:
             return "cuda"
 
         model_info = SUPPORTED_MODELS.get(model_id) or {}
-        required = float(model_info.get("gpu_vram_recommended_gb", 5.5))
+        required = float(
+            model_info.get("gpu_vram_recommended_gb")
+            or VRAM_REQUIRED_GB.get(model_id, DEFAULT_VRAM_REQUIRED_GB)
+        )
         available = float(info.get("vram_gb") or 0.0)
         if info.get("cuda_available") and available >= required:
             return "cuda"
@@ -970,6 +1151,8 @@ class ModelManager:
 
             import torch
             from qwen_tts import Qwen3TTSModel
+
+            tune_cpu_threads()
 
             if target == "cuda":
                 dtype = torch.float16
@@ -1114,6 +1297,8 @@ class ModelManager:
                     else "El texto largo se dividió por frases para reducir deriva."
                 ),
                 actual_backend,
+                chunk_index=index,
+                chunk_count=len(chunks),
             )
 
             kwargs = {
@@ -1230,16 +1415,21 @@ def list_audio(directory: Path, include_transcript: bool = False) -> list[dict]:
             item["channels"] = prepared.get("channels")
             item["rms_dbfs"] = prepared.get("rms_dbfs")
             item["prepared"] = bool(ref_info.get("prepared"))
+            item["analyzing"] = bool(ref_info.get("analyzing"))
         items.append(item)
     return items
 
 
 @app.get("/api/health")
 def health():
+    # `engine` identifies *this* server. The desktop shell checks it so a
+    # stranger already listening on the port cannot be mistaken for us.
     return {
         "ok": True,
+        "engine": "voice-studio-ai",
         "model": DEFAULT_MODEL_ID,
         "data_root": str(DATA_ROOT),
+        "library_warming_up": WARM_UP.busy,
     }
 
 
@@ -1265,17 +1455,9 @@ def status():
 
 @app.get("/api/models")
 def models():
-    direct = [supported_model_payload(model_id) for model_id in SUPPORTED_MODELS]
-    discovery = []
-    for item in CURATED_DISCOVERY_MODELS:
-        row = dict(item)
-        row["avatar_url"] = huggingface_author_avatar(row.get("author", ""))
-        row["hub_url"] = f"https://huggingface.co/{row['id']}"
-        discovery.append(row)
     return {
         "recommended_id": DEFAULT_MODEL_ID,
-        "compatible": direct,
-        "discovery": discovery,
+        "compatible": [supported_model_payload(mid) for mid in SUPPORTED_MODELS],
     }
 
 
@@ -1299,14 +1481,6 @@ def model_install_status(model_id: str):
     return MODEL_INSTALLER.get_state(model_id)
 
 
-@app.get("/api/models/search")
-def model_search(q: str = "", limit: int = 16):
-    return {
-        "query": q,
-        "results": search_huggingface_models(q, max(1, min(limit, 24))),
-    }
-
-
 @app.get("/api/history")
 def history():
     return load_history()
@@ -1315,7 +1489,7 @@ def history():
 @app.delete("/api/history")
 def clear_history():
     save_history([])
-    return {"ok": True}
+    return {"ok": True, "removed_files": prune_orphan_outputs([])}
 
 
 @app.get("/api/voices")
@@ -1371,6 +1545,34 @@ def update_voice_transcript(voice_id: str, request: TranscriptUpdate):
         "quality_score": metadata.get("quality_score", 0),
         "quality_label": metadata.get("quality_label", "Sin analizar"),
     }
+
+
+@app.post("/api/voices/{voice_id}/prime", status_code=202)
+def prime_voice(voice_id: str):
+    """
+    Precomputes the clone prompt for a voice the user just selected.
+
+    Building it costs ~9 s and is cached per voice, so doing it now — while
+    they are still writing the script — takes that time off the first
+    generation. Fire-and-forget: failures surface later on the real request.
+    """
+    path = find_audio(VOICES_DIR, voice_id)
+
+    def worker() -> None:
+        try:
+            model, backend = MODEL_MANAGER.load("auto", DEFAULT_MODEL_ID)
+            sidecar = transcript_path(path)
+            ref_text = (
+                sidecar.read_text(encoding="utf-8", errors="ignore").strip()
+                if sidecar.exists()
+                else None
+            )
+            MODEL_MANAGER.get_clone_prompt(model, path, ref_text or None, backend)
+        except Exception as exc:
+            print(f"[prime] no se pudo preparar la voz {voice_id}: {exc}")
+
+    threading.Thread(target=worker, name=f"prime-{voice_id[:16]}", daemon=True).start()
+    return {"ok": True, "voice_id": voice_id}
 
 
 @app.get("/api/sounds/{sound_id}/audio")
@@ -1595,6 +1797,7 @@ def generate(request: GenerateRequest):
         candidate = sidecar.read_text(encoding="utf-8", errors="ignore").strip()
         ref_text = candidate or None
 
+    STATUS.start_request()
     STATUS.set(
         "checking",
         "Comprobando hardware",
@@ -1748,6 +1951,7 @@ def generate(request: GenerateRequest):
             detail=f"{type(exc).__name__}: {exc}",
         ) from exc
     finally:
+        STATUS.end_request()
         if request.request_id:
             clear_generation_cancelled(request.request_id)
 
@@ -1794,6 +1998,7 @@ def set_history_music(history_id: str, request: HistoryMusicRequest):
         settings["music_id"] = None
         settings["music_name"] = None
         save_history(items)
+        prune_orphan_outputs(items)
         return item
 
     music_path = find_audio(SOUNDS_DIR, request.sound_id)
@@ -1835,14 +2040,59 @@ def set_history_music(history_id: str, request: HistoryMusicRequest):
     settings["music_name"] = music_name
     settings["music_volume"] = round(music_volume, 2)
     save_history(items)
+    # The previous mix is no longer referenced by anything.
+    prune_orphan_outputs(items)
     return item
+
+
+def audio_pipeline_probe() -> str:
+    """
+    Runs every librosa/soundfile call the engine makes at runtime.
+
+    `import librosa` is not proof that librosa works: librosa attaches its
+    submodules through lazy_loader, so a runtime built without scikit-learn
+    imports cleanly and only explodes on the first real call. That is exactly
+    how a packaged engine shipped that started fine yet failed with "No module
+    named 'sklearn'" on every voice import and every generation. Touching the
+    real calls is the only check that catches it.
+    """
+    import tempfile
+
+    import librosa
+    import numpy as np
+    import soundfile as sf
+
+    tone = (0.25 * np.sin(2 * np.pi * 220.0 * np.arange(24000) / 24000.0)).astype(
+        np.float32
+    )
+
+    with tempfile.TemporaryDirectory() as workspace:
+        source = Path(workspace) / "self_test.wav"
+        sf.write(str(source), tone, 24000, subtype="PCM_16")
+
+        # prepare_reference_audio()
+        loaded, _ = librosa.load(str(source), sr=24000, mono=True)
+        trimmed, _ = librosa.effects.trim(loaded, top_db=35)
+
+        # apply_audio_postprocessing()
+        stretched = librosa.effects.time_stretch(trimmed, rate=1.05)
+        librosa.effects.pitch_shift(y=stretched, sr=24000, n_steps=1.0)
+
+        # audio_ingest.decode_audio_file()
+        librosa.resample(tone, orig_sr=24000, target_sr=44100)
+        decoded, rate = decode_audio_file(source, target_sr=44100)
+
+    if not decoded.size or rate != 44100:
+        raise RuntimeError("La decodificación de audio devolvió un resultado vacío.")
+    return f"librosa+soundfile OK ({decoded.shape[0]} muestras @ {rate} Hz)"
 
 
 def packaging_self_test() -> int:
     """
-    Lightweight packaged-runtime test.
-    It intentionally does NOT download a model. It verifies that the frozen
-    engine can import the exact runtime stack needed before NSIS is attempted.
+    Packaged-runtime test.
+
+    It intentionally does NOT download a model, but it does EXERCISE the audio
+    pipeline (see audio_pipeline_probe) instead of only importing it.
     """
     checks = []
 
@@ -1856,10 +2106,13 @@ def packaging_self_test() -> int:
     check("numpy", lambda: __import__("numpy").__version__)
     check("soundfile", lambda: __import__("soundfile").__version__)
     check("librosa", lambda: __import__("librosa").__version__)
+    check("scikit-learn", lambda: __import__("sklearn").__version__)
     check("torch", lambda: __import__("torch").__version__)
     check("transformers", lambda: __import__("transformers").__version__)
     check("accelerate", lambda: __import__("accelerate").__version__)
     check("huggingface_hub", lambda: __import__("huggingface_hub").__version__)
+
+    check("pipeline de audio", audio_pipeline_probe)
 
     def qwen_check():
         from importlib.util import find_spec
@@ -1898,6 +2151,27 @@ def packaging_self_test() -> int:
     return 0
 
 
+def port_conflict() -> Optional[str]:
+    """
+    Bind the port before uvicorn does so a conflict produces a readable
+    message in engine.log instead of an opaque WinError traceback.
+    """
+    import socket
+
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        probe.bind(("127.0.0.1", PORT))
+    except OSError as exc:
+        return (
+            f"El puerto {PORT} ya está ocupado por otro programa ({exc}). "
+            "Cierra la otra copia de Voice Studio AI o el programa que lo usa, "
+            f"o define QWEN_ENGINE_PORT con un puerto libre."
+        )
+    finally:
+        probe.close()
+    return None
+
+
 if __name__ == "__main__":
     if "--self-test-packaging" in sys.argv:
         raise SystemExit(packaging_self_test())
@@ -1909,6 +2183,15 @@ if __name__ == "__main__":
     print(f"Data: {DATA_ROOT}")
     print(f"API:  http://127.0.0.1:{PORT}")
     print()
+
+    conflict = port_conflict()
+    if conflict:
+        print(f"ENGINE_START_FAILED: {conflict}", flush=True)
+        raise SystemExit(3)
+
+    # Seeding and reference analysis run here, alongside a port that is
+    # already accepting requests, instead of delaying startup.
+    WARM_UP.start()
 
     uvicorn.run(
         app,

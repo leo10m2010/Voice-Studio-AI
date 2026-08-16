@@ -42,6 +42,7 @@ class ModelInstallRegistry:
         self._downloader = downloader
         self._lock = threading.Lock()
         self._states: dict[str, dict] = {}
+        self._size_cache: dict[str, int] = {}
         self._active_model_id: Optional[str] = None
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.records_dir.mkdir(parents=True, exist_ok=True)
@@ -135,10 +136,25 @@ class ModelInstallRegistry:
         except (TypeError, ValueError):
             return 0
 
-    def _downloaded_bytes(self, model_id: str) -> int:
+    def _downloaded_bytes(self, model_id: str, *, live: bool = False) -> int:
+        """
+        Total bytes on disk for a model.
+
+        Walking a finished 2.3 GB snapshot takes hundreds of milliseconds, and
+        /api/models is hit on every refresh and polled once a second during an
+        install. Once a model is installed its size no longer changes, so the
+        result is memoized; `live=True` forces a fresh walk while downloading.
+        """
         root = self._repo_cache_dir(model_id)
         if not root.exists():
             return 0
+
+        if not live:
+            with self._lock:
+                cached = self._size_cache.get(model_id)
+            if cached is not None:
+                return cached
+
         total = 0
         for path in root.rglob("*"):
             try:
@@ -146,7 +162,15 @@ class ModelInstallRegistry:
                     total += path.stat().st_size
             except OSError:
                 continue
+
+        if not live:
+            with self._lock:
+                self._size_cache[model_id] = total
         return total
+
+    def _invalidate_size(self, model_id: str) -> None:
+        with self._lock:
+            self._size_cache.pop(model_id, None)
 
     def _installed_state(self, model_id: str, snapshot: Path) -> dict:
         record = self._load_record(model_id) or {}
@@ -170,7 +194,7 @@ class ModelInstallRegistry:
             current = dict(self._states.get(model_id) or {})
 
         if current.get("state") == "downloading":
-            current["downloaded_bytes"] = self._downloaded_bytes(model_id)
+            current["downloaded_bytes"] = self._downloaded_bytes(model_id, live=True)
             return current
 
         snapshot = self.cached_snapshot(model_id)
@@ -242,6 +266,9 @@ class ModelInstallRegistry:
         try:
             snapshot = self._snapshot_download(model_id, local_files_only=False)
             record = self._write_record(model_id, snapshot)
+            # The download just changed what is on disk; drop the memoized size
+            # so the finished state reports the real total.
+            self._invalidate_size(model_id)
             state = self._installed_state(model_id, snapshot)
             state["installed_at"] = record["installed_at"]
         except Exception as exc:

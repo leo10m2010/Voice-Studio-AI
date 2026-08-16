@@ -2,7 +2,7 @@ param(
     [ValidateSet("cpu","nvidia")]
     [string]$Flavor = "nvidia",
     [string]$EngineDir = "engine-dist\qwen-engine",
-    [string]$Version = "1.0.2",
+    [string]$Version = "1.0.3",
     [string]$OutputDir = "engine-release"
 )
 

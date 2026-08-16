@@ -2,7 +2,7 @@ import "./styles.css";
 
 const API = "http://127.0.0.1:8765";
 const DEFAULT_MODEL_ID = "Qwen/Qwen3-TTS-12Hz-0.6B-Base";
-const REQUIRED_ENGINE_VERSION = "1.0.2";
+const REQUIRED_ENGINE_VERSION = "1.0.3";
 
 const icons = {
   wave: `<svg viewBox="0 0 24 24"><path d="M4 13v-2M8 17V7M12 20V4M16 16V8M20 13v-2"/></svg>`,
@@ -36,7 +36,7 @@ const state = {
   voices: [],
   sounds: [],
   history: [],
-  models: { recommended_id: DEFAULT_MODEL_ID, compatible: [], discovery: [] },
+  models: { recommended_id: DEFAULT_MODEL_ID, compatible: [] },
   model: null,
   voice: null,
   result: null,
@@ -48,7 +48,6 @@ const state = {
   waveform: [],
   waveformUrl: null,
   seeking: false,
-  modelSearchTimer: null,
   modelInstallTimer: null,
   modelInstallId: null,
   activeSheet: null,
@@ -56,6 +55,7 @@ const state = {
   musicBusy: false,
   generationRequestId: null,
   generationController: null,
+  generationEstimate: null,
   engine: {
     status: null,
     catalog: null,
@@ -64,6 +64,8 @@ const state = {
     installing: false,
     bridgeReady: false,
     bootStarted: false,
+    workspaceReady: false,
+    statusError: false,
     recovering: false
   }
 };
@@ -91,6 +93,19 @@ document.querySelector("#app").innerHTML = `
 
     <section class="main-grid">
       <section class="editor-pane">
+        <div class="boot-failure" id="bootFailure" hidden>
+          <span class="boot-failure-icon">${icons.info}</span>
+          <div class="boot-failure-copy">
+            <strong>El motor local no se pudo iniciar</strong>
+            <p id="bootFailureDetail"></p>
+            <small>Sin el motor no se puede generar audio ni agregar voces.</small>
+          </div>
+          <div class="boot-failure-actions">
+            <button class="secondary-button pressable" id="retryBoot" type="button">${icons.refresh}<span>Reintentar</span></button>
+            <button class="secondary-button pressable" id="bootDiagnostics" type="button">Copiar diagnóstico</button>
+          </div>
+        </div>
+
         <div class="editor-scroll">
           <div class="editor-canvas">
             <textarea id="scriptInput" maxlength="3000"
@@ -99,6 +114,7 @@ document.querySelector("#app").innerHTML = `
             <div class="editor-meta">
               <span id="characterCount">0 / 3000</span>
               <span id="durationEstimate">≈ 0 s</span>
+              <span id="renderEstimate"></span>
               <span id="iclStatus">Selecciona una voz</span>
             </div>
 
@@ -123,6 +139,10 @@ document.querySelector("#app").innerHTML = `
           <div class="generation-copy">
             <strong id="generationTitle">Generando locución</strong>
             <span id="generationText">Preparando el motor…</span>
+            <div class="generation-progress" id="generationProgress" hidden>
+              <span class="generation-bar"><i id="generationBar"></i></span>
+              <small id="generationClock"></small>
+            </div>
           </div>
           <span class="generation-engine" id="generationEngine">LOCAL</span>
           <button class="strip-cancel pressable" id="cancelGeneration" type="button" title="Cancelar generación" hidden>${icons.close}</button>
@@ -360,18 +380,8 @@ document.querySelector("#app").innerHTML = `
 
   <div class="sheet-view" id="modelSheetView" hidden>
     <div class="model-section">
-      <span class="section-label">Compatibles ahora</span>
+      <span class="section-label">Modelos disponibles</span>
       <div class="sheet-list model-list" id="compatibleModelList"></div>
-    </div>
-
-    <div class="model-section hf-section">
-      <div class="section-label-row">
-        <span class="section-label">Buscar en Hugging Face</span>
-        <span class="online-badge">ONLINE</span>
-      </div>
-      <div class="search-box">${icons.search}<input id="modelSearch" placeholder="Ej.: Chatterbox, OpenVoice, Qwen…"></div>
-      <div class="search-state" id="modelSearchState">Busca modelos TTS del Hub. Los que requieran otra API se marcarán como “Adaptador”.</div>
-      <div class="sheet-list model-list" id="modelSearchResults"></div>
     </div>
   </div>
 </section>
@@ -529,6 +539,7 @@ document.querySelector("#app").innerHTML = `
 
           <div class="manage-actions">
             <button class="secondary-button pressable" id="repairEngineButton" type="button">${icons.refresh}<span>Reparar / actualizar</span></button>
+            <button class="secondary-button pressable" id="engineDiagnosticsButton" type="button">${icons.info}<span>Copiar diagnóstico</span></button>
             <button class="danger-outline pressable" id="uninstallEngineButton" type="button">${icons.trash}<span>Desinstalar motor</span></button>
           </div>
 
@@ -552,6 +563,7 @@ const $$ = q => [...document.querySelectorAll(q)];
 
 const el = {
   script: $("#scriptInput"), count: $("#characterCount"), duration: $("#durationEstimate"), icl: $("#iclStatus"),
+  renderEstimate: $("#renderEstimate"), generationProgress: $("#generationProgress"), generationBar: $("#generationBar"), generationClock: $("#generationClock"),
   strip: $("#generationStrip"), stripTitle: $("#generationTitle"), stripText: $("#generationText"), stripEngine: $("#generationEngine"), orb: $("#thinkingOrb"), cancelGeneration: $("#cancelGeneration"),
   generate: $("#generateButton"), generateIcon: $("#generateIcon"), generateText: $("#generateText"), transport: $("#transport"),
   audio: $("#resultAudio"), player: $("#audioPlayer"), playerPlay: $("#playerPlay"), playerCurrent: $("#playerCurrent"),
@@ -565,12 +577,12 @@ const el = {
   profileButtons: $("#profileButtons"), speed: $("#speed"), speedValue: $("#speedValue"), stability: $("#stability"), style: $("#style"),
   pitch: $("#pitch"), pitchValue: $("#pitchValue"), output: $("#outputFormat"), soundSelect: $("#soundSelect"), previewSound: $("#previewSound"),
   addSound: $("#addSound"), repairSounds: $("#repairSounds"), soundFile: $("#soundFile"), musicVolume: $("#musicVolume"), musicVolumeValue: $("#musicVolumeValue"), musicStatus: $("#musicStatus"),
-  speakerBoost: $("#speakerBoost"), mode: $("#mode"), reset: $("#resetSettings"), theme: $("#themeButton"), modelStatus: $("#modelStatus"),
+  speakerBoost: $("#speakerBoost"), mode: $("#mode"), reset: $("#resetSettings"), theme: $("#themeButton"),
   settingsPanel: $("#settingsPanel"), historyPanel: $("#historyPanel"), tabs: $("#tabs"), historySearch: $("#historySearch"), historyList: $("#historyList"), clearHistory: $("#clearHistory"),
   selectorSheet: $("#selectorSheet"), selectorBack: $("#selectorBack"), selectorTitle: $("#selectorTitle"), selectorSubtitle: $("#selectorSubtitle"),
   voiceSheetView: $("#voiceSheetView"), modelSheetView: $("#modelSheetView"),
   voiceSearch: $("#voiceSearch"), voiceList: $("#voiceList"), addVoice: $("#addVoice"), voiceFile: $("#voiceFile"),
-  compatibleModelList: $("#compatibleModelList"), modelSearch: $("#modelSearch"), modelSearchState: $("#modelSearchState"), modelSearchResults: $("#modelSearchResults"),
+  compatibleModelList: $("#compatibleModelList"),
   transcriptDialog: $("#transcriptDialog"), transcriptForm: $("#transcriptForm"), transcriptInput: $("#transcriptInput"), saveTranscript: $("#saveTranscript"), removeTranscript: $("#removeTranscript"),
   voiceImportDialog: $("#voiceImportDialog"), voiceImportForm: $("#voiceImportForm"), importSummary: $("#importSummary"), importTranscript: $("#importTranscript"), confirmVoiceImport: $("#confirmVoiceImport"),
   tooltip: $("#tooltip"), toast: $("#toast"),
@@ -584,7 +596,10 @@ const el = {
   setupProgressMessage: $("#setupProgressMessage"), setupProgressBar: $("#setupProgressBar"), setupProgressPercent: $("#setupProgressPercent"),
   setupProgressBytes: $("#setupProgressBytes"), setupSteps: $("#setupSteps"), cancelEngineInstall: $("#cancelEngineInstall"),
   setupDoneMeta: $("#setupDoneMeta"), enterStudioButton: $("#enterStudioButton"), manageEngineTitle: $("#manageEngineTitle"),
-  manageEngineMeta: $("#manageEngineMeta"), repairEngineButton: $("#repairEngineButton"), uninstallEngineButton: $("#uninstallEngineButton")
+  manageEngineMeta: $("#manageEngineMeta"), repairEngineButton: $("#repairEngineButton"), uninstallEngineButton: $("#uninstallEngineButton"),
+  engineDiagnosticsButton: $("#engineDiagnosticsButton"),
+  bootFailure: $("#bootFailure"), bootFailureDetail: $("#bootFailureDetail"),
+  retryBoot: $("#retryBoot"), bootDiagnostics: $("#bootDiagnostics")
 };
 
 function esc(v){return String(v??"").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;").replaceAll("'","&#039;")}
@@ -592,12 +607,26 @@ function clamp(v,a,b){return Math.max(a,Math.min(b,v))}
 function fmtTime(v){if(!Number.isFinite(v)||v<0)return"0:00";const m=Math.floor(v/60),s=Math.floor(v%60);return`${m}:${String(s).padStart(2,"0")}`}
 function prettyDate(v){try{return new Intl.DateTimeFormat("es-PE",{dateStyle:"medium",timeStyle:"short"}).format(new Date(v))}catch{return""}}
 
+// Every call gets a deadline unless it opts out with `signal` (generation can
+// legitimately run for minutes). Without one, a wedged engine left the UI
+// waiting forever with no message — which reads to the user as "I pressed the
+// button and nothing happened".
+const API_TIMEOUT_MS=20000;
+
 async function api(path, options={}){
+  const {signal,...rest}=options;
   let r;
   try{
-    r=await fetch(`${API}${path}`,{cache:"no-store",...options});
+    r=await fetch(`${API}${path}`,{
+      cache:"no-store",
+      signal:signal??AbortSignal.timeout(API_TIMEOUT_MS),
+      ...rest
+    });
   }catch(networkError){
-    if(networkError?.name==="AbortError")throw networkError;
+    if(signal&&networkError?.name==="AbortError")throw networkError;
+    if(networkError?.name==="TimeoutError"||networkError?.name==="AbortError"){
+      throw new Error("El motor local tardó demasiado en responder. Puede estar bloqueado; reinicia Voice Studio AI.");
+    }
     throw new Error("No se pudo conectar con el motor local. Puede haberse detenido; reinicia Voice Studio AI.");
   }
   if(!r.ok){const b=await r.json().catch(()=>({}));throw new Error(b.detail||b.error||`HTTP ${r.status}`)}
@@ -609,16 +638,6 @@ function authorMark(model){
   const author=model?.author||model?.id?.split("/")[0]||"AI";
   return esc(author.slice(0,1).toUpperCase());
 }
-function avatarHTML(model, cls="model-avatar"){
-  const url=model?.avatar_url;
-  return `<span class="${cls}">${url?`<img src="${esc(url)}" alt="" loading="lazy">`:""}<span>${authorMark(model)}</span></span>`;
-}
-function installAvatarFallbacks(root=document){
-  root.querySelectorAll(".model-avatar img").forEach(img=>{
-    img.addEventListener("error",()=>img.remove(),{once:true});
-  });
-}
-
 function selectedModel(){
   return state.model || state.models.compatible.find(m=>m.id===state.models.recommended_id) || state.models.compatible[0] || null;
 }
@@ -641,6 +660,7 @@ function applyModelInstallStatus(modelId,status){
 function renderModelInstallStatus(){
   const model=selectedModel();
   if(!model){
+    el.modelInstallCard.hidden=false;
     el.modelInstallCard.dataset.state="not_installed";
     el.modelInstallTitle.textContent="Selecciona un modelo";
     el.modelInstallMeta.textContent="Elige un modelo compatible para instalarlo.";
@@ -653,13 +673,11 @@ function renderModelInstallStatus(){
   el.modelInstallCard.dataset.state=status;
   el.installSelectedModel.classList.toggle("installed",status==="installed");
 
-  if(status==="installed"){
-    el.modelInstallTitle.textContent="Modelo instalado";
-    el.modelInstallMeta.textContent=`${model.name} · disponible sin conexión`;
-    el.installSelectedModel.innerHTML=`${icons.check}<span>Instalado</span>`;
-    el.installSelectedModel.disabled=true;
-    return;
-  }
+  // Cuando ya está instalado esta tarjeta solo repetía lo que el selector de
+  // Modelo dice justo encima ("Instalado · Recomendado · 2.52 GB"). Se muestra
+  // únicamente cuando hay algo que hacer: instalar, esperar o reintentar.
+  el.modelInstallCard.hidden=status==="installed";
+  if(status==="installed")return;
   if(status==="downloading"){
     const downloaded=Number(model.downloaded_bytes||0);
     const expected=Number(model.expected_bytes||0);
@@ -685,13 +703,8 @@ function renderModelInstallStatus(){
   el.installSelectedModel.disabled=false;
 }
 function selectModel(id){
-  const all=[...(state.models.compatible||[]),...(state.models.discovery||[])];
-  const found=all.find(m=>m.id===id);
+  const found=(state.models.compatible||[]).find(m=>m.id===id);
   if(!found) return false;
-  if(!found.compatible){
-    toast(found.compatibility_note||"Este modelo requiere un adaptador diferente.","error");
-    return false;
-  }
   state.model=found;
   updateModelUI();
   savePreferences();
@@ -702,8 +715,7 @@ function updateModelUI(){
   if(!m){renderModelInstallStatus();updateGenerate();return}
   el.selectedModelName.textContent=m.name;
   el.selectedModelMeta.textContent=`${m.installed?"Instalado":"Sin instalar"} · ${m.recommended?"Recomendado · ":""}${m.disk_gb?`${m.disk_gb} GB`:"local"}`;
-  el.selectedModelAvatar.innerHTML=`${m.avatar_url?`<img src="${esc(m.avatar_url)}" alt="">`:""}<span>${authorMark(m)}</span>`;
-  installAvatarFallbacks(el.selectedModelAvatar);
+  el.selectedModelAvatar.innerHTML=`<span>${authorMark(m)}</span>`;
   el.bottomMode.textContent=m.name;
   renderModelInstallStatus();
   updateGenerate();
@@ -712,53 +724,26 @@ function updateModelUI(){
 function renderCompatibleModels(){
   const list=state.models.compatible||[];
   el.compatibleModelList.innerHTML=list.length
-    ? list.map((m,i)=>modelRow(m,i,true)).join("")
+    ? list.map(modelRow).join("")
     : `<div class="empty-list compact"><strong>Cargando modelos…</strong><span>Qwen recomendado aparecerá aquí.</span></div>`;
-  installAvatarFallbacks(el.compatibleModelList);
 }
-function modelRow(m,i,selectable){
+function modelRow(m,i){
   const installState=modelInstallState(m);
-  const meta=[
-    m.family,
-    m.disk_gb?`${m.disk_gb} GB`:null,
-    m.license,
-  ].filter(Boolean).join(" · ");
-  const action=!m.compatible
-    ? `<span class="compat-badge adapter">Adaptador</span>`
-    : installState==="installed"
-      ? `<button class="model-row-action installed" type="button" disabled>${icons.check}<span>Instalado</span></button>`
-      : installState==="downloading"
-        ? `<button class="model-row-action" type="button" disabled><span class="spinner"></span><span>Instalando</span></button>`
-        : `<button class="model-row-action" type="button" data-install-model="${esc(m.id)}">${installState==="error"?"Reintentar":"Instalar"}</button>`;
+  const meta=[m.family,m.disk_gb?`${m.disk_gb} GB`:null,m.license].filter(Boolean).join(" · ");
+  const action=installState==="installed"
+    ? `<button class="model-row-action installed" type="button" disabled>${icons.check}<span>Instalado</span></button>`
+    : installState==="downloading"
+      ? `<button class="model-row-action" type="button" disabled><span class="spinner"></span><span>Instalando</span></button>`
+      : `<button class="model-row-action" type="button" data-install-model="${esc(m.id)}">${installState==="error"?"Reintentar":"Instalar"}</button>`;
   return `<div class="model-row ${state.model?.id===m.id?"selected":""}" data-install-state="${esc(installState)}" style="--i:${i}">
-    ${avatarHTML(m)}
-    <button class="model-main" data-model="${esc(m.id)}" ${selectable&&m.compatible?"":"data-disabled='true'"}>
+    <span class="model-avatar"><span>${authorMark(m)}</span></span>
+    <button class="model-main" data-model="${esc(m.id)}">
       <span class="model-title-line"><strong>${esc(m.name)}</strong>${m.recommended?`<em>Recomendado</em>`:""}</span>
-      <small>${esc(meta||m.author||"Hugging Face")}</small>
-      ${m.compatibility_note?`<p>${esc(m.compatibility_note)}</p>`:""}
+      <small>${esc(meta||m.author||"Qwen")}</small>
     </button>
     ${action}
   </div>`;
 }
-function wireModelRows(root){
-  installAvatarFallbacks(root);
-}
-async function searchModels(){
-  const q=el.modelSearch.value.trim();
-  clearTimeout(state.modelSearchTimer);
-  if(q.length<2){el.modelSearchResults.innerHTML="";el.modelSearchState.textContent="Escribe al menos 2 caracteres.";return}
-  el.modelSearchState.textContent="Buscando en Hugging Face…";
-  state.modelSearchTimer=setTimeout(async()=>{
-    try{
-      const data=await api(`/api/models/search?q=${encodeURIComponent(q)}&limit=18`);
-      const list=data.results||[];
-      el.modelSearchState.textContent=list.length?`${list.length} resultados · la ejecución depende del adaptador.`:"No se encontraron modelos TTS.";
-      el.modelSearchResults.innerHTML=list.map((m,i)=>modelRow(m,i,true)).join("");
-      wireModelRows(el.modelSearchResults);
-    }catch(e){el.modelSearchState.textContent="Sin conexión con Hugging Face. Los modelos compatibles locales siguen disponibles."}
-  },300);
-}
-
 async function refreshModelsOnly(){
   const selectedId=state.model?.id;
   const models=await api("/api/models");
@@ -892,12 +877,14 @@ function updateMusicUI(){
 
   const hasResult=!!state.result?.history?.id;
   const appliedId=state.result?.music_id||"";
-  el.applyMusic.disabled=!hasResult||!selected||selected.id===appliedId||state.musicBusy;
-  el.removeMusic.disabled=!hasResult||!appliedId||state.musicBusy;
+  // Only "already in that state" and "busy" disable these. Missing
+  // prerequisites are explained by updateResultMusic() on click.
+  el.applyMusic.disabled=state.musicBusy||(hasResult&&!!selected&&selected.id===appliedId);
+  el.removeMusic.disabled=state.musicBusy||(hasResult&&!appliedId);
   el.musicButton.classList.toggle("has-music",!!appliedId);
 
   if(!hasResult){
-    el.musicStatus.textContent="Genera una locución primero para poder agregarle música.";
+    el.musicStatus.textContent="Genera una locución, o elige una del historial, para agregarle música.";
   }else if(selected){
     el.musicStatus.innerHTML=selected.id===appliedId
       ? `<strong>${esc(selected.name)}</strong> ya está aplicada a este resultado.`
@@ -910,16 +897,20 @@ function updateMusicUI(){
 }
 
 async function updateResultMusic(soundId){
+  if(state.musicBusy)return;
   const historyId=state.result?.history?.id;
-  if(!historyId||state.musicBusy)return;
+  if(!historyId){
+    toast("Genera una locución o elige una del historial antes de aplicar música.","error");
+    return;
+  }
   state.musicBusy=true;updateMusicUI();
   try{
     const updated=await api(`/api/history/${encodeURIComponent(historyId)}/music`,{
       method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({sound_id:soundId||null,music_volume:Number(el.musicVolume.value)/100})
+      body:JSON.stringify({sound_id:soundId||null,music_volume:Number(el.musicVolume.value)/100}),
+      signal:AbortSignal.timeout(120000)
     });
-    state.result={...state.result,history:updated,music_id:updated.music_id,music_name:updated.music_name,url:updated.url,filename:updated.filename};
-    await setResultAudio(`${API}${updated.url}`,updated.filename,state.voice?.name);
+    await setResultAudio(`${API}${updated.url}`,updated.filename,updated.voice_name,updated);
     await refreshData();
     toast(soundId?`Música aplicada: ${updated.music_name}`:"Música quitada.","success");
   }catch(e){
@@ -941,12 +932,15 @@ function renderHistory(){
   const q=el.historySearch.value.trim().toLowerCase();
   const list=state.history.filter(h=>!q||`${h.title} ${h.voice_name} ${h.model_name||""}`.toLowerCase().includes(q));
   el.historyList.innerHTML=list.length?list.map((h,i)=>`
-    <button class="history-item pressable" data-history-url="${esc(h.url)}" data-history-file="${esc(h.filename)}" data-history-voice="${esc(h.voice_name)}" style="--i:${i}">
+    <button class="history-item pressable" data-history-id="${esc(h.id)}" style="--i:${i}">
       <span class="history-play">${icons.play}</span>
       <span class="history-copy"><strong>${esc(h.title)}</strong><small>${esc(h.voice_name)} · ${esc(h.model_name||"Qwen")}${h.music_name?` · ♪ ${esc(h.music_name)}`:""} · ${prettyDate(h.created_at)}</small></span>
       <span class="history-format">${esc((h.filename||"wav").split(".").pop().toUpperCase())}</span>
     </button>`).join(""):`<div class="empty-list"><strong>Aún no hay historial</strong><span>Las locuciones aparecerán aquí.</span></div>`;
-  $$("[data-history-url]").forEach(b=>b.onclick=()=>setResultAudio(`${API}${b.dataset.historyUrl}`,b.dataset.historyFile,b.dataset.historyVoice));
+  $$("[data-history-id]").forEach(b=>b.onclick=()=>{
+    const item=state.history.find(h=>h.id===b.dataset.historyId);
+    if(item)setResultAudio(`${API}${item.url}`,item.filename,item.voice_name,item);
+  });
 }
 
 function triggerFor(kind){
@@ -1006,7 +1000,7 @@ function openSheet(kind){
   el.selectorSheet.classList.add("open");
 
   requestAnimationFrame(()=>{
-    (kind==="voice" ? el.voiceSearch : el.modelSearch)?.focus();
+    if(kind==="voice") el.voiceSearch?.focus();
   });
 }
 
@@ -1037,15 +1031,66 @@ function applyProfile(name,announce=true){
   $$("#profileButtons button").forEach(b=>b.classList.toggle("active",b.dataset.profile===name));
   syncLabels();savePreferences();if(announce)toast(`Perfil ${name==="faithful"?"Fiel":name==="spot"?"Spot":"Natural"} aplicado.`);
 }
+// How long a render actually takes on THIS machine, learned from real runs.
+// It ranges from ~1x real time on a GPU to ~11x on an old CPU, so a fixed
+// number would be useless; an exponential average converges in a few runs and
+// keeps adapting if the backend changes (CPU → CUDA).
+const CALIBRATION_KEY="vsa-seconds-per-char";
+function renderSecondsPerChar(){
+  const stored=Number(localStorage.getItem(CALIBRATION_KEY));
+  return Number.isFinite(stored)&&stored>0?stored:0;
+}
+function recordRenderTime(chars,seconds){
+  if(chars<20||!Number.isFinite(seconds)||seconds<=0)return;
+  const measured=seconds/chars,previous=renderSecondsPerChar();
+  const blended=previous?previous*0.7+measured*0.3:measured;
+  try{localStorage.setItem(CALIBRATION_KEY,String(blended))}catch{}
+}
+function estimateRenderSeconds(){
+  const perChar=renderSecondsPerChar();
+  const chars=el.script.value.trim().length;
+  return perChar&&chars?Math.round(perChar*chars):null;
+}
+function fmtDuration(seconds){
+  if(!Number.isFinite(seconds)||seconds<0)return "—";
+  if(seconds<60)return `${Math.round(seconds)} s`;
+  const m=Math.floor(seconds/60),s=Math.round(seconds%60);
+  return s?`${m} min ${s} s`:`${m} min`;
+}
+function updateRenderEstimate(){
+  const seconds=estimateRenderSeconds();
+  el.renderEstimate.textContent=seconds?`≈ ${fmtDuration(seconds)} de proceso`:"";
+}
 function estimateDuration(){
   const text=el.script.value.trim();if(!text){el.duration.textContent="≈ 0 s";return}
   const words=text.split(/\s+/).filter(Boolean).length,speed=Math.max(.8,Number(el.speed.value)||1),seconds=Math.max(1,Math.round(words/(2.65*speed)));
   el.duration.textContent=`≈ ${seconds} s`;el.duration.classList.toggle("target",seconds>=9&&seconds<=11);
 }
-function syncLabels(){el.speedValue.textContent=`${Number(el.speed.value).toFixed(2)}×`;el.pitchValue.textContent=`${Number(el.pitch.value).toFixed(1)} st`;el.musicVolumeValue.textContent=`${el.musicVolume.value}%`;estimateDuration()}
+function syncLabels(){el.speedValue.textContent=`${Number(el.speed.value).toFixed(2)}×`;el.pitchValue.textContent=`${Number(el.pitch.value).toFixed(1)} st`;el.musicVolumeValue.textContent=`${el.musicVolume.value}%`;estimateDuration();updateRenderEstimate()}
+// Returns why generating is impossible right now, or null when it is ready.
+// The message is what the user sees when they press the button — a disabled
+// button that explains nothing is the same thing as a broken app.
+function generationBlocker(){
+  const model=selectedModel();
+  if(!state.engine.workspaceReady)return {
+    message:"El motor local todavía no está listo. Revisa el estado del motor en Ajustes.",
+    action:"engine"
+  };
+  if(!el.script.value.trim())return {message:"Escribe primero el guion que quieres convertir en voz."};
+  if(!state.voice)return {message:"Selecciona una voz antes de generar.",action:"voice"};
+  if(!model)return {message:"No hay ningún modelo disponible. Revisa el motor local.",action:"engine"};
+  if(!model.installed)return {
+    message:`El modelo ${model.name} no está instalado. Pulsa "Instalar modelo" en Ajustes.`,
+    action:"model"
+  };
+  return null;
+}
 function updateGenerate(){
   const model=selectedModel();
-  el.generate.disabled=!(state.voice&&model?.compatible&&model.installed&&el.script.value.trim())||state.busy;
+  // Only `busy` disables the button. Every other unmet condition is explained
+  // on click by generationBlocker() instead of silently swallowing the press.
+  el.generate.disabled=state.busy;
+  el.generate.classList.toggle("not-ready",!state.busy&&Boolean(generationBlocker()));
   if(!state.busy)el.generateText.textContent=model&&!model.installed?"Instala el modelo":state.result?"Regenerar":"Generar";
 }
 function savePreferences(){
@@ -1102,7 +1147,30 @@ function stageFor(st){
     saving:["Guardando resultado","Escribiendo el archivo final."],
     done:["Locución lista","El reproductor ya está disponible."]
   };
-  const [a,b]=map[st.stage]||["Procesando",st.message||"Trabajando localmente."];el.stripTitle.textContent=a;el.stripText.textContent=b;el.stripEngine.textContent=String(st.backend||"LOCAL").toUpperCase()
+  const [a,b]=map[st.stage]||["Procesando",st.message||"Trabajando localmente."];el.stripTitle.textContent=a;el.stripText.textContent=b;el.stripEngine.textContent=String(st.backend||"LOCAL").toUpperCase();
+  renderProgress(st);
+}
+
+// A spinner that runs for 100 seconds is indistinguishable from a hang. Show
+// elapsed time against the learned estimate, and the chunk being synthesized.
+function renderProgress(st){
+  const elapsed=Number(st.elapsed_seconds||0);
+  if(!state.busy||elapsed<=0){el.generationProgress.hidden=true;return}
+  el.generationProgress.hidden=false;
+
+  const estimated=state.generationEstimate;
+  const chunks=Number(st.chunk_count||0),chunk=Number(st.chunk_index||0);
+  // Cap at 96% so the bar never claims to be finished before it is.
+  const ratio=estimated?Math.min(elapsed/estimated,0.96):Math.min(elapsed/120,0.9);
+  el.generationBar.style.width=`${Math.round(ratio*100)}%`;
+
+  const parts=[fmtDuration(elapsed)];
+  if(estimated){
+    const left=Math.max(0,estimated-elapsed);
+    parts.push(left>1?`faltan ≈ ${fmtDuration(left)}`:"terminando…");
+  }
+  if(chunks>1)parts.push(`fragmento ${chunk} de ${chunks}`);
+  el.generationClock.textContent=parts.join(" · ");
 }
 function pollStatus(){
   clearInterval(state.statusTimer);
@@ -1124,18 +1192,28 @@ function pollStatus(){
 }
 
 async function generate(){
-  if(!state.voice||!selectedModel()?.compatible||!el.script.value.trim())return;
-  if(!selectedModel()?.installed){toast("Instala el modelo seleccionado antes de generar.","error");return}
+  const blocked=generationBlocker();
+  if(blocked){
+    toast(blocked.message,"error");
+    if(blocked.action==="voice")openSheet("voice");
+    if(blocked.action==="model")switchTab("settings");
+    if(blocked.action==="engine")showEngineManager();
+    return;
+  }
+  const characters=el.script.value.trim().length;
+  const startedAt=performance.now();
+  state.generationEstimate=estimateRenderSeconds();
   stopPreview();setBusy(true);pollStatus();
   const requestId=crypto.randomUUID();
   state.generationRequestId=requestId;
   state.generationController=new AbortController();
   try{
     const result=await api("/api/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...settingsPayload(),request_id:requestId}),signal:state.generationController.signal});
+    recordRenderTime(characters,(performance.now()-startedAt)/1000);
+    updateRenderEstimate();
     const url=`${API}${result.url}`,name=result.filename;
-    state.result=result;state.selectedSoundId="";
-    await setResultAudio(url,name,state.voice.name);
-    updateMusicUI();
+    state.selectedSoundId="";
+    await setResultAudio(url,name,state.voice.name,result.history);
     el.strip.classList.add("success");
     el.stripTitle.textContent="Locución lista";
     el.stripText.textContent=`${result.model_name} · ${result.backend.toUpperCase()} · ${result.used_transcript?"ICL":"X-vector"}`;
@@ -1151,6 +1229,8 @@ async function generate(){
   }finally{
     clearInterval(state.statusTimer);state.statusTimer=null;setBusy(false);
     state.generationController=null;state.generationRequestId=null;
+    state.generationEstimate=null;
+    el.generationProgress.hidden=true;
   }
 }
 function cancelGeneration(){
@@ -1160,11 +1240,19 @@ function cancelGeneration(){
   api("/api/generate/cancel",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({request_id:requestId})}).catch(()=>{});
 }
 
-async function setResultAudio(url,filename,voiceName){
-  state.result={...(state.result||{}),url,filename};
+// `history` identifies WHICH locution the player is showing. It must travel
+// with the audio: loading an item from the history list used to keep the
+// previous result's history entry, so applying music afterwards remixed the
+// wrong locution — or did nothing at all when no generation had happened yet.
+async function setResultAudio(url,filename,voiceName,history=null){
+  state.result=history
+    ? {...history,history,url,filename}
+    : {...(state.result||{}),url,filename};
   el.audio.src=url;el.download.href=url;el.download.download=filename||"locucion.wav";el.download.classList.remove("disabled");
   el.bottomVoice.textContent=voiceName||state.voice?.name||"Resultado";
   el.player.classList.add("visible");el.transport.classList.add("has-result");
+  state.selectedSoundId=history?.music_id||"";
+  updateMusicUI();
   await buildWaveform(url);
   try{await el.audio.play();el.playerPlay.innerHTML=icons.pause}catch{}
 }
@@ -1211,9 +1299,19 @@ async function refreshData(){
     const m=models.compatible.find(x=>x.id===state.model.id);state.model=m||models.compatible.find(x=>x.id===models.recommended_id)||models.compatible[0]||null;updateModelUI()
   }
   state.system=system;updateHardwareHint();updateVoiceUI();
+  scheduleWarmUpRefresh();
+}
+
+// The engine serves the library immediately and analyzes references in the
+// background, so the first launch is not blocked by one librosa decode per
+// voice. Poll gently until every voice reports a finished analysis.
+function scheduleWarmUpRefresh(){
+  clearTimeout(scheduleWarmUpRefresh.t);
+  if(!state.voices.some(v=>v.analyzing))return;
+  scheduleWarmUpRefresh.t=setTimeout(()=>{refreshData().catch(()=>{})},3000);
 }
 function updateHardwareHint(){
-  const sys=state.system;if(!sys)return;const m=selectedModel(),need=Number(m?.gpu_vram_recommended_gb||5.5),vram=Number(sys.vram_gb||0),auto=sys.cuda_available&&vram>=need?"CUDA":"CPU";
+  const sys=state.system;if(!sys)return;const m=selectedModel(),need=Number(m?.gpu_vram_recommended_gb||2.5),vram=Number(sys.vram_gb||0),auto=sys.cuda_available&&vram>=need?"CUDA":"CPU";
   el.hardware.textContent=sys.cuda_available?`${sys.gpu_name} · ${vram.toFixed(1)} GB · Auto→${auto}`:"CPU · modo local";
 }
 function switchTab(tab){
@@ -1234,16 +1332,19 @@ async function prepareImport(file){
   state.pendingVoiceFile=file;const d=await fileDuration(file),note=d==null?"No se pudo leer duración":d<3?"Muy corto para Qwen":d<=8?"Válido; una referencia más rica puede ayudar":d<=25?"Rango recomendado":d<=35?"Utilizable; revisa que todo sea consistente":"Referencia larga; usa solo un tramo limpio si la voz cambia";
   el.importSummary.innerHTML=`<strong>${esc(file.name)}</strong><span>${d?`${d.toFixed(1)} s · `:""}${note}</span>`;el.importTranscript.value="";el.voiceImportDialog.showModal()
 }
+// Uploads go through api() so an engine that is down or wedged produces the
+// same explanation as every other call instead of a bare "Failed to fetch".
 async function importVoice(file,transcript){
-  const f=new FormData();f.append("file",file);f.append("transcript",transcript||"");const r=await fetch(`${API}/api/voices/import`,{method:"POST",body:f}),data=await r.json();if(!r.ok)throw new Error(data.detail||"No se pudo importar");
+  const f=new FormData();
+  f.append("file",file);
+  f.append("transcript",transcript||"");
+  const data=await api("/api/voices/import",{method:"POST",body:f,signal:AbortSignal.timeout(120000)});
   await refreshData();state.voice=state.voices.find(v=>v.id===data.id)||null;updateVoiceUI();return data
 }
 async function importSound(file){
   const f=new FormData();
   f.append("file",file);
-  const r=await fetch(`${API}/api/sounds/import`,{method:"POST",body:f});
-  const data=await r.json();
-  if(!r.ok)throw new Error(data.detail||"No se pudo importar");
+  const data=await api("/api/sounds/import",{method:"POST",body:f,signal:AbortSignal.timeout(120000)});
   state.selectedSoundId=data.id;
   await refreshData();
   state.selectedSoundId=data.id;
@@ -1292,8 +1393,30 @@ function closeEngineSetup(){
   el.engineSetup.setAttribute("aria-hidden","true");
   document.documentElement.classList.remove("engine-modal-open");
 }
+// Every path must end in a definite state. "Comprobando…" is only legitimate
+// while a check is actually in flight: it used to be the permanent label in
+// the browser (where there is no Tauri to ask) and whenever engine_status
+// failed, so the card sat there claiming to be checking something forever.
 function updateEngineMini(){
   const s=state.engine.status;
+
+  if(!isDesktop()){
+    // Run from `npm run local`: the engine is owned by the dev script, not by
+    // the app, so there is no install state — only whether it answers.
+    const ready=state.engine.workspaceReady;
+    el.engineMiniTitle.textContent=ready?"Motor local · activo":"Motor local · sin respuesta";
+    el.engineMiniMeta.textContent=ready
+      ?"Modo desarrollo · gestionado fuera de la app"
+      :"Arráncalo con npm run local";
+    el.manageEngine.textContent="Diagnóstico";
+    return;
+  }
+
+  if(state.engine.statusError){
+    el.engineMiniTitle.textContent="No se pudo comprobar el motor";
+    el.engineMiniMeta.textContent="Abre Gestionar para ver el detalle";
+    return;
+  }
   if(!s){
     el.engineMiniTitle.textContent="Comprobando…";
     el.engineMiniMeta.textContent="Python y PyTorch privados de Voice Studio AI";
@@ -1467,9 +1590,12 @@ async function handleEngineCrash(){
     hideStrip(1800);
     toast("Motor local reiniciado.","success");
     await refreshData();
-  }catch{
+  }catch(error){
+    state.engine.workspaceReady=false;
+    updateGenerate();
     el.stripTitle.textContent="No se pudo reiniciar el motor";
     el.stripText.textContent="Cierra y vuelve a abrir Voice Studio AI.";
+    showBootFailure(error?.message||"El motor local se detuvo y no pudo reiniciarse.");
     toast("No se pudo reiniciar el motor local. Cierra y vuelve a abrir la app.","error");
   }finally{
     state.engine.recovering=false;
@@ -1504,17 +1630,106 @@ async function installSelectedEngine(){
   el.cancelEngineInstall.disabled=true;
 }
 async function refreshEngineStatus(){
-  if(!isDesktop())return null;
+  if(!isDesktop()){
+    // No hay motor que consultar por IPC, pero la tarjeta igual tiene que
+    // decir algo definitivo en vez de quedarse en "Comprobando…".
+    updateEngineMini();
+    return null;
+  }
   try{
     const status=await tauriInvoke("engine_status");
     state.engine.status=status;
+    state.engine.statusError=false;
     updateEngineMini();
     return status;
   }catch(error){
     console.error(error);
+    state.engine.statusError=true;
+    updateEngineMini();
     return null;
   }
 }
+async function buildDiagnosticsReport(){
+  const lines=[
+    "=== Voice Studio AI · diagnóstico ===",
+    `Fecha: ${new Date().toISOString()}`,
+    `Modo: ${isDesktop()?"aplicación de escritorio":"navegador"}`,
+    `Motor requerido: ${REQUIRED_ENGINE_VERSION}`
+  ];
+
+  try{
+    const health=await api("/api/health");
+    lines.push(`Motor local: RESPONDE (${health.engine||"desconocido"})`);
+    lines.push(`Datos: ${health.data_root}`);
+    if(health.library_warming_up)lines.push("Biblioteca: preparándose en segundo plano");
+  }catch(error){
+    lines.push(`Motor local: NO RESPONDE — ${error.message}`);
+  }
+
+  try{
+    const system=await api("/api/system");
+    lines.push(`Torch: ${system.torch_version||"—"} · CUDA: ${system.cuda_available?system.cuda_version:"no"}`);
+    lines.push(`GPU: ${system.gpu_name||"CPU"} ${system.vram_gb?`· ${system.vram_gb} GB`:""}`);
+    if(system.python_error)lines.push(`Error de Python: ${system.python_error}`);
+  }catch{
+    lines.push("Torch/GPU: sin datos (el motor no respondió).");
+  }
+
+  try{
+    const models=await api("/api/models");
+    for(const model of models.compatible||[]){
+      lines.push(`Modelo ${model.id}: ${model.install_state}${model.install_error?` — ${model.install_error}`:""}`);
+    }
+  }catch{
+    lines.push("Modelos: sin datos.");
+  }
+
+  if(isDesktop()){
+    try{
+      const d=await tauriInvoke("engine_diagnostics");
+      lines.push(
+        `App: ${d.app_version}`,
+        `Motor instalado: ${d.status.installed?`${d.status.label||"?"} ${d.status.version||"?"} (${d.status.flavor||"?"})`:"NO"}`,
+        `Ejecutable presente: ${d.status.executable_exists?"sí":"no"} · en ejecución: ${d.status.running?"sí":"no"}`,
+        `Hardware: ${d.hardware.nvidia_available?`${d.hardware.gpu_name} · ${d.hardware.vram_gb?.toFixed?.(1)} GB · driver ${d.hardware.driver_version}`:"sin NVIDIA detectada"}`,
+        `Carpeta del motor: ${d.engine_root}`,
+        `Catálogo: ${d.manifest_source}`
+      );
+      if(d.last_install_error)lines.push(`Último error de instalación: ${d.last_install_error.trim()}`);
+      lines.push("",`--- ${d.log_path} ---`,d.log_tail.trim()||"(el motor no dejó registro todavía)");
+    }catch(error){
+      lines.push(`No se pudo leer el diagnóstico del escritorio: ${error}`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
+async function copyDiagnostics(button){
+  const original=button.textContent;
+  button.disabled=true;
+  button.textContent="Recopilando…";
+  try{
+    const report=await buildDiagnosticsReport();
+    await navigator.clipboard.writeText(report);
+    toast("Diagnóstico copiado. Pégalo donde puedas revisarlo.","success");
+  }catch(error){
+    console.error(error);
+    toast("No se pudo copiar el diagnóstico automáticamente.","error");
+  }finally{
+    button.disabled=false;
+    button.textContent=original;
+  }
+}
+
+function showBootFailure(message){
+  el.bootFailure.hidden=false;
+  el.bootFailureDetail.textContent=message;
+}
+function hideBootFailure(){
+  el.bootFailure.hidden=true;
+}
+
 async function showFirstRunEngine(){
   configureEngineIntro("install");
   openEngineSetup("engineIntroView",false);
@@ -1568,9 +1783,35 @@ function initTheme(){
   const t=localStorage.getItem("vsa-theme")||(matchMedia("(prefers-color-scheme:dark)").matches?"dark":"light");document.documentElement.dataset.theme=t;el.theme.innerHTML=t==="dark"?icons.sun:icons.moon
 }
 async function startTauriEngine(){if(!isDesktop())return;await tauriInvoke("start_engine")}
-async function waitEngine(){for(let i=0;i<60;i++){try{await api("/api/health");return true}catch{await new Promise(r=>setTimeout(r,600))}}return false}
 
-el.script.oninput=()=>{el.count.textContent=`${el.script.value.length} / 3000`;estimateDuration();updateGenerate()};
+// Waits for the engine to answer, reporting progress instead of staring at a
+// frozen screen. `engine` in the health payload proves it is our server and
+// not some unrelated program that happens to hold the port.
+async function waitEngine({timeoutMs=90000}={}){
+  const deadline=Date.now()+timeoutMs;
+  let attempt=0;
+  while(Date.now()<deadline){
+    try{
+      const health=await api("/api/health",{signal:AbortSignal.timeout(4000)});
+      if(health?.engine&&health.engine!=="voice-studio-ai"){
+        throw new Error(`El puerto 8765 lo está usando otro programa (${health.engine}).`);
+      }
+      return true;
+    }catch(error){
+      if(String(error.message||"").includes("otro programa"))throw error;
+      attempt++;
+      if(attempt===6){
+        el.stripTitle.textContent="Iniciando el motor local";
+        el.stripText.textContent="La primera vez puede tardar un poco más.";
+        el.strip.classList.add("visible");
+      }
+      await new Promise(r=>setTimeout(r,600));
+    }
+  }
+  return false;
+}
+
+el.script.oninput=()=>{el.count.textContent=`${el.script.value.length} / 3000`;estimateDuration();updateRenderEstimate();updateGenerate()};
 el.voiceSelector.onclick=e=>{
   e.preventDefault();
   e.stopPropagation();
@@ -1605,6 +1846,9 @@ el.voiceList.onclick=e=>{
   updateVoiceUI();
   renderVoices(el.voiceSearch.value);
   closeSheet("voice",{focus:true});
+  // Build the clone prompt now, while the script is still being written, so
+  // the first generation does not pay for it.
+  api(`/api/voices/${encodeURIComponent(voice.id)}/prime`,{method:"POST"}).catch(()=>{});
 };
 
 function handleModelListClick(e){
@@ -1632,12 +1876,11 @@ function handleModelListClick(e){
   }
 }
 el.compatibleModelList.onclick=handleModelListClick;
-el.modelSearchResults.onclick=handleModelListClick;
 el.installSelectedModel.onclick=()=>{
   const model=selectedModel();
   if(model)installModel(model.id);
 };
-el.voiceSearch.oninput=()=>renderVoices(el.voiceSearch.value);el.modelSearch.oninput=searchModels;
+el.voiceSearch.oninput=()=>renderVoices(el.voiceSearch.value);
 el.addVoice.onclick=()=>el.voiceFile.click();el.voiceFile.onchange=()=>{const f=el.voiceFile.files?.[0];if(f)prepareImport(f);el.voiceFile.value=""};
 el.voiceImportForm.onsubmit=async e=>{if(e.submitter?.value==="cancel")return;e.preventDefault();if(!state.pendingVoiceFile)return;el.confirmVoiceImport.disabled=true;try{await importVoice(state.pendingVoiceFile,el.importTranscript.value.trim());el.voiceImportDialog.close();state.pendingVoiceFile=null;toast("Voz importada y preparada.","success")}catch(err){toast(err.message,"error")}finally{el.confirmVoiceImport.disabled=false}};
 el.improveClone.onclick=openTranscript;el.transcriptForm.onsubmit=async e=>{if(e.submitter?.value==="cancel")return;e.preventDefault();try{await saveTranscript(el.transcriptInput.value.trim());el.transcriptDialog.close();toast("Transcripción guardada.","success")}catch(err){toast(err.message,"error")}};
@@ -1689,8 +1932,14 @@ el.musicVolume.oninput=()=>{
   updateMusicUI();
   savePreferences();
 };
-el.applyMusic.onclick=()=>updateResultMusic(state.selectedSoundId||null);
-el.removeMusic.onclick=()=>updateResultMusic(null);
+el.applyMusic.onclick=()=>{
+  if(!state.selectedSoundId)return toast("Elige primero una pista en la lista.","error");
+  updateResultMusic(state.selectedSoundId);
+};
+el.removeMusic.onclick=()=>{
+  if(!state.result?.music_id)return toast("Esta locución no tiene música aplicada.","error");
+  updateResultMusic(null);
+};
 el.speakerBoost.onclick=()=>{toggle(el.speakerBoost);savePreferences()};el.reset.onclick=()=>{state.profile="natural";applyProfile("natural",false);el.mode.value="auto";el.output.value="wav";savePreferences();toast("Valores restablecidos.")};
 
 el.installEngineButton.onclick=installSelectedEngine;
@@ -1703,10 +1952,13 @@ el.enterStudioButton.onclick=async()=>{
   closeEngineSetup();
   await launchWorkspace();
 };
-el.manageEngine.onclick=showEngineManager;
+el.manageEngine.onclick=()=>isDesktop()?showEngineManager():copyDiagnostics(el.manageEngine);
 el.engineSetupClose.onclick=closeEngineSetup;
 el.repairEngineButton.onclick=repairEngine;
 el.uninstallEngineButton.onclick=removeEngine;
+el.engineDiagnosticsButton.onclick=()=>copyDiagnostics(el.engineDiagnosticsButton);
+el.bootDiagnostics.onclick=()=>copyDiagnostics(el.bootDiagnostics);
+el.retryBoot.onclick=()=>{state.engine.bootStarted=false;launchWorkspace()};
 
 $$(".quick-prompts button").forEach(b=>b.onclick=()=>{el.script.value=b.dataset.prompt;el.script.dispatchEvent(new Event("input"))});
 $$(".help").forEach(b=>{b.onmouseenter=()=>{el.tooltip.textContent=b.dataset.tip;const r=b.getBoundingClientRect();el.tooltip.style.left=`${Math.min(innerWidth-300,Math.max(10,r.left-240))}px`;el.tooltip.style.top=`${r.bottom+7}px`;el.tooltip.classList.add("show")};b.onmouseleave=()=>el.tooltip.classList.remove("show")});
@@ -1733,19 +1985,30 @@ document.addEventListener("click",e=>{
 async function launchWorkspace(){
   if(state.engine.bootStarted)return;
   state.engine.bootStarted=true;
+  hideBootFailure();
   try{
     await startTauriEngine();
-    if(!(await waitEngine()))throw new Error("El motor local no pudo iniciarse.");
+    if(!(await waitEngine())){
+      throw new Error("El motor local no respondió a tiempo. Puede estar bloqueado por el antivirus o por otro programa.");
+    }
     await refreshEngineStatus();
     await refreshData();
     syncLabels();
+    state.engine.workspaceReady=true;
+    hideStrip(200);
+    updateGenerate();
+    updateEngineMini();
   }catch(error){
     state.engine.bootStarted=false;
-    const message=String(error);
+    state.engine.workspaceReady=false;
+    updateGenerate();
+    updateEngineMini();
+    const message=error?.message||String(error);
     if(message.includes("ENGINE_NOT_INSTALLED")){
       await showFirstRunEngine();
       return;
     }
+    showBootFailure(message);
     toast(message,"error");
   }
 }

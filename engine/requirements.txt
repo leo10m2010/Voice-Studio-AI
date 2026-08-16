@@ -6,4 +6,11 @@ soundfile>=0.12,<1
 librosa>=0.11,<1
 numpy>=1.26,<3
 
+# librosa attaches its submodules lazily and pulls scikit-learn in on the
+# first real call (effects.trim, decompose, segment). Declaring it here keeps
+# it from being treated as an optional transitive dependency that packaging
+# is free to drop — that is what produced "No module named 'sklearn'" at
+# runtime in a build whose imports all looked fine.
+scikit-learn>=1.3,<2
+
 huggingface_hub>=0.34,<2
