@@ -196,6 +196,26 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.prepare-release.outputs.tag }}
         run: gh release upload "$TAG" engine-manifest.json --repo "${{ github.repository }}" --clobber
+
+      # La app apunta a 'engine-latest', no a la Release versionada: la URL va
+      # compilada en el instalador, así que un catálogo fijado por versión
+      # dejaba a las apps antiguas viendo para siempre el motor con el que
+      # salieron. Este puntero estable hace que publicar un motor alcance a
+      # todas las versiones instaladas.
+      - name: Actualizar puntero engine-latest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.prepare-release.outputs.version }}
+        run: |
+          if ! gh release view engine-latest --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release create engine-latest \
+              --repo "${{ github.repository }}" \
+              --title "Motor actual" \
+              --notes "Apunta siempre al motor publicado más reciente. La aplicación consulta el engine-manifest.json de esta Release."
+          fi
+          gh release upload engine-latest engine-manifest.json --repo "${{ github.repository }}" --clobber
+          gh release edit engine-latest --repo "${{ github.repository }}" \
+            --notes "Motor actual: v$VERSION. Apunta siempre al motor publicado más reciente. La aplicación consulta el engine-manifest.json de esta Release."
       - name: Verificar assets publicados
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

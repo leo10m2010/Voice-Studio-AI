@@ -56,6 +56,7 @@ const state = {
   generationRequestId: null,
   generationController: null,
   generationEstimate: null,
+  appUpdate: null,
   engine: {
     status: null,
     catalog: null,
@@ -93,6 +94,16 @@ document.querySelector("#app").innerHTML = `
 
     <section class="main-grid">
       <section class="editor-pane">
+        <div class="update-banner" id="updateBanner" hidden>
+          <span class="update-icon">${icons.download}</span>
+          <div class="update-copy">
+            <strong id="updateTitle">Hay una versión nueva</strong>
+            <small id="updateMeta"></small>
+          </div>
+          <button class="secondary-button pressable" id="openUpdate" type="button">Ver la actualización</button>
+          <button class="icon-button small pressable" id="dismissUpdate" type="button" aria-label="Ocultar aviso">${icons.close}</button>
+        </div>
+
         <div class="boot-failure" id="bootFailure" hidden>
           <span class="boot-failure-icon">${icons.info}</span>
           <div class="boot-failure-copy">
@@ -599,7 +610,9 @@ const el = {
   manageEngineMeta: $("#manageEngineMeta"), repairEngineButton: $("#repairEngineButton"), uninstallEngineButton: $("#uninstallEngineButton"),
   engineDiagnosticsButton: $("#engineDiagnosticsButton"),
   bootFailure: $("#bootFailure"), bootFailureDetail: $("#bootFailureDetail"),
-  retryBoot: $("#retryBoot"), bootDiagnostics: $("#bootDiagnostics")
+  retryBoot: $("#retryBoot"), bootDiagnostics: $("#bootDiagnostics"),
+  updateBanner: $("#updateBanner"), updateTitle: $("#updateTitle"), updateMeta: $("#updateMeta"),
+  openUpdate: $("#openUpdate"), dismissUpdate: $("#dismissUpdate")
 };
 
 function esc(v){return String(v??"").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;").replaceAll("'","&#039;")}
@@ -1722,6 +1735,46 @@ async function copyDiagnostics(button){
   }
 }
 
+// Informational only: it never downloads or installs anything, it points at
+// the release. Dismissing is remembered per version so the same one does not
+// nag every launch, but a newer one still gets through.
+const UPDATE_DISMISSED_KEY="vsa-update-dismissed";
+async function checkAppUpdate(){
+  if(!isDesktop())return;
+  let update=null;
+  try{
+    update=await tauriInvoke("check_app_update");
+  }catch(error){
+    // Being offline, or behind a corporate proxy, must not surface as an error.
+    console.warn("No se pudo comprobar la versión:",error);
+    return;
+  }
+  if(!update)return;
+  try{
+    if(localStorage.getItem(UPDATE_DISMISSED_KEY)===update.version)return;
+  }catch{}
+
+  state.appUpdate=update;
+  el.updateTitle.textContent=`Versión ${update.version} disponible`;
+  el.updateMeta.textContent=`Tienes la ${update.current_version}. Actualizar corrige y mejora el motor local.`;
+  el.updateBanner.hidden=false;
+}
+function dismissAppUpdate(){
+  el.updateBanner.hidden=true;
+  try{
+    if(state.appUpdate?.version)localStorage.setItem(UPDATE_DISMISSED_KEY,state.appUpdate.version);
+  }catch{}
+}
+async function openAppUpdate(){
+  const url=state.appUpdate?.url;
+  if(!url)return;
+  try{
+    await tauriInvoke("open_release_page",{url});
+  }catch(error){
+    toast(String(error),"error");
+  }
+}
+
 function showBootFailure(message){
   el.bootFailure.hidden=false;
   el.bootFailureDetail.textContent=message;
@@ -1959,6 +2012,8 @@ el.uninstallEngineButton.onclick=removeEngine;
 el.engineDiagnosticsButton.onclick=()=>copyDiagnostics(el.engineDiagnosticsButton);
 el.bootDiagnostics.onclick=()=>copyDiagnostics(el.bootDiagnostics);
 el.retryBoot.onclick=()=>{state.engine.bootStarted=false;launchWorkspace()};
+el.openUpdate.onclick=openAppUpdate;
+el.dismissUpdate.onclick=dismissAppUpdate;
 
 $$(".quick-prompts button").forEach(b=>b.onclick=()=>{el.script.value=b.dataset.prompt;el.script.dispatchEvent(new Event("input"))});
 $$(".help").forEach(b=>{b.onmouseenter=()=>{el.tooltip.textContent=b.dataset.tip;const r=b.getBoundingClientRect();el.tooltip.style.left=`${Math.min(innerWidth-300,Math.max(10,r.left-240))}px`;el.tooltip.style.top=`${r.bottom+7}px`;el.tooltip.classList.add("show")};b.onmouseleave=()=>el.tooltip.classList.remove("show")});
@@ -2022,6 +2077,8 @@ async function boot(){
     await launchWorkspace();
     return;
   }
+
+  checkAppUpdate();
 
   await initEngineBridge();
   const status=await refreshEngineStatus();

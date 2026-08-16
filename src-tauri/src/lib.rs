@@ -23,7 +23,14 @@ use zip::ZipArchive;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
-const ENGINE_MANIFEST_URL: &str = "https://github.com/leo10m2010/Voice-Studio-AI/releases/download/engine-v1.0.3/engine-manifest.json";
+const GITHUB_REPO: &str = "leo10m2010/Voice-Studio-AI";
+// Deliberately NOT pinned to engine-vX.Y.Z. The URL is compiled into the
+// installer, so a version-pinned catalog meant an older app could only ever
+// see the engine it shipped with — including a broken one — and publishing a
+// fix never reached it. `engine-latest` is a fixed release whose manifest is
+// overwritten on every engine publish, so every app version sees the current
+// engine. The minimum an app requires is still enforced by the frontend.
+const ENGINE_MANIFEST_URL: &str = "https://github.com/leo10m2010/Voice-Studio-AI/releases/download/engine-latest/engine-manifest.json";
 const ENGINE_PORT: &str = "8765";
 // Percent budget for downloading+verifying+installing all parts, combined and
 // byte-weighted, so the bar advances by actual size instead of by part count
@@ -130,6 +137,54 @@ struct EngineDiagnostics {
     log_path: String,
     log_tail: String,
     last_install_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct AppUpdate {
+    version: String,
+    current_version: String,
+    url: String,
+    published_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubRelease {
+    tag_name: String,
+    html_url: String,
+    #[serde(default)]
+    published_at: Option<String>,
+    #[serde(default)]
+    draft: bool,
+    #[serde(default)]
+    prerelease: bool,
+}
+
+/// True when `current` is strictly older than `candidate`, comparing numeric
+/// components. Mirrors versionIsOlder() in the frontend.
+fn version_is_older(current: &str, candidate: &str) -> bool {
+    let parse = |value: &str| -> Vec<u64> {
+        value
+            .trim()
+            .trim_start_matches(['v', 'V'])
+            .split('.')
+            .map(|part| {
+                part.chars()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect::<String>()
+                    .parse()
+                    .unwrap_or(0)
+            })
+            .collect()
+    };
+    let (left, right) = (parse(current), parse(candidate));
+    for index in 0..left.len().max(right.len()) {
+        let a = left.get(index).copied().unwrap_or(0);
+        let b = right.get(index).copied().unwrap_or(0);
+        if a != b {
+            return a < b;
+        }
+    }
+    false
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -986,6 +1041,87 @@ fn engine_status(app: AppHandle, process: State<EngineProcess>) -> Result<Engine
     engine_status_value(&app, process.inner())
 }
 
+/// Reports a newer published release, or None.
+///
+/// Queried from Rust rather than the webview on purpose: the frontend's CSP
+/// only allows the local engine, and this keeps it that way instead of opening
+/// `connect-src` to an external host. Purely informational — nothing is
+/// downloaded or installed.
+#[tauri::command]
+async fn check_app_update() -> Result<Option<AppUpdate>, String> {
+    let current = env!("CARGO_PKG_VERSION").to_string();
+
+    let release: GithubRelease = tauri::async_runtime::spawn_blocking(move || {
+        let client = http_client()?;
+        let response = client
+            .get(format!(
+                "https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+            ))
+            .header("Accept", "application/vnd.github+json")
+            .timeout(Duration::from_secs(12))
+            .send()
+            .map_err(|error| format!("No se pudo consultar las versiones: {error}"))?;
+
+        if !response.status().is_success() {
+            return Err(format!("GitHub respondió HTTP {}.", response.status()));
+        }
+
+        let body = response
+            .text()
+            .map_err(|error| format!("No se pudo leer la respuesta: {error}"))?;
+        serde_json::from_str::<GithubRelease>(&body)
+            .map_err(|error| format!("Respuesta de versiones no válida: {error}"))
+    })
+    .await
+    .map_err(|error| format!("La comprobación de versión se interrumpió: {error}"))??;
+
+    if release.draft || release.prerelease {
+        return Ok(None);
+    }
+
+    let latest = release.tag_name.trim_start_matches(['v', 'V']).to_string();
+    if !version_is_older(&current, &latest) {
+        return Ok(None);
+    }
+
+    Ok(Some(AppUpdate {
+        version: latest,
+        current_version: current,
+        url: release.html_url,
+        published_at: release.published_at,
+    }))
+}
+
+/// Opens a release page in the system browser.
+///
+/// Restricted to this repository's own URLs: the argument reaches a process
+/// launcher, so anything else is refused rather than trusted.
+#[tauri::command]
+fn open_release_page(url: String) -> Result<(), String> {
+    let allowed = format!("https://github.com/{GITHUB_REPO}/");
+    if !url.starts_with(&allowed) {
+        return Err("Enlace no permitido.".into());
+    }
+
+    #[cfg(windows)]
+    {
+        // rundll32 receives the URL as a plain argument, so there is no shell
+        // to reinterpret it (unlike `cmd /c start`).
+        hidden_command("rundll32")
+            .args(["url.dll,FileProtocolHandler", &url])
+            .spawn()
+            .map_err(|error| format!("No se pudo abrir el enlace: {error}"))?;
+    }
+    #[cfg(not(windows))]
+    {
+        Command::new("xdg-open")
+            .arg(&url)
+            .spawn()
+            .map_err(|error| format!("No se pudo abrir el enlace: {error}"))?;
+    }
+    Ok(())
+}
+
 /// Everything needed to explain a failure on a machine we cannot inspect,
 /// in one copyable payload: what is installed, what hardware was detected,
 /// and the tail of the engine's own output.
@@ -1129,6 +1265,27 @@ mod tests {
         manifest.engines[0].download_bytes = 11;
         assert!(validate_manifest(&manifest).is_err());
     }
+
+    #[test]
+    fn detects_a_newer_published_version() {
+        assert!(version_is_older("0.7.6", "0.8.0"));
+        assert!(version_is_older("0.7.6", "v0.7.7"));
+        assert!(version_is_older("0.9.0", "0.10.0"));
+    }
+
+    #[test]
+    fn ignores_same_or_older_versions() {
+        assert!(!version_is_older("0.7.6", "0.7.6"));
+        assert!(!version_is_older("0.7.6", "v0.7.6"));
+        assert!(!version_is_older("0.8.0", "0.7.9"));
+        assert!(!version_is_older("1.0.0", "0.10.0"));
+    }
+
+    #[test]
+    fn only_this_repository_can_be_opened() {
+        assert!(open_release_page("https://example.com/evil".into()).is_err());
+        assert!(open_release_page("https://github.com/otro/repo/releases".into()).is_err());
+    }
 }
 
 #[tauri::command]
@@ -1258,7 +1415,9 @@ pub fn run() {
             install_engine,
             cancel_engine_install,
             start_engine,
-            uninstall_engine
+            uninstall_engine,
+            check_app_update,
+            open_release_page
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {

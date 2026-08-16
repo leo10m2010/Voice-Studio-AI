@@ -271,3 +271,9 @@ dialog{width:min(540px,calc(100vw - 40px));padding:0;border:1px solid var(--line
 .generation-progress small{flex:0 0 auto;color:var(--muted);font-size:.44rem;font-variant-numeric:tabular-nums}
 #renderEstimate:empty{display:none}
 .model-install-card[hidden]{display:none}
+.update-banner{display:grid;grid-template-columns:auto minmax(0,1fr) auto auto;align-items:center;gap:12px;margin:0 0 12px;padding:11px 14px;border:1px solid var(--line);border-radius:14px;background:var(--surface-2)}
+.update-banner[hidden]{display:none}
+.update-icon{display:grid;place-items:center;width:28px;height:28px;border-radius:9px;background:var(--accent-soft);color:var(--accent-strong)}
+.update-icon svg{width:16px;height:16px}
+.update-copy strong{display:block;font-size:.58rem}
+.update-copy small{display:block;margin-top:3px;color:var(--muted);font-size:.46rem;line-height:1.4}

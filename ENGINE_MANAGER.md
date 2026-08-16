@@ -38,7 +38,13 @@ aplicación y NO se borran al reparar/desinstalar el engine.
 
 La app consulta:
 
-https://github.com/leo10m2010/Voice-Studio-AI/releases/download/engine-v1.0.3/engine-manifest.json
+https://github.com/leo10m2010/Voice-Studio-AI/releases/download/engine-latest/engine-manifest.json
+
+`engine-latest` es una Release fija cuyo `engine-manifest.json` se sobrescribe
+en cada publicación de motor. **No apuntes a una Release versionada**: la URL
+va compilada dentro del instalador, así que fijarla por versión dejaba a las
+apps antiguas viendo para siempre el motor con el que salieron —incluido uno
+defectuoso— y publicar la corrección nunca las alcanzaba.
 
 Puede sobrescribirse en desarrollo con:
 
@@ -55,7 +61,8 @@ Ese workflow:
 2. construye CPU y NVIDIA por separado;
 3. divide cada runtime en ZIPs pequeños;
 4. sube las partes;
-5. crea y sube `engine-manifest.json`.
+5. crea y sube `engine-manifest.json`;
+6. actualiza el puntero `engine-latest`, que es lo que la app consulta.
 
 ### Opción local
 

@@ -69,6 +69,16 @@ Copiar diagnóstico. Causas frecuentes, en orden:
 La descarga viene de Hugging Face. En una red corporativa suele estar
 bloqueada. El diagnóstico muestra `Modelo <id>: error` con el detalle.
 
+## Avisos de versión
+
+Al abrir, la app consulta si hay una Release más reciente y muestra una franja
+con enlace. **No descarga ni instala nada**: la actualización se hace bajando
+el instalador. Si estás sin conexión o detrás de un proxy, la consulta falla en
+silencio y no molesta. Ocultar el aviso lo silencia solo para esa versión.
+
+El motor local es distinto: ese sí se actualiza solo, y la app consulta siempre
+`engine-latest`, así que una app antigua también recibe el motor corregido.
+
 ## Qué NO es problema
 
 - Que las voces aparezcan al principio como "Analizando…": el motor sirve la
