@@ -30,6 +30,7 @@ from audio_ingest import (
     transcode_music_to_wav,
     validate_canonical_music,
 )
+from text_normalize import normalize_spanish
 from model_install import ModelInstallRegistry
 
 DEFAULT_MODEL_ID = "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
@@ -1873,6 +1874,12 @@ def generate(request: GenerateRequest):
             detail="El guion no contiene texto que se pueda pronunciar.",
         )
 
+    # El modelo lee mal precios, horas y fechas (issue #328): "S/ 25.50" o
+    # "3:30 pm" salen deletreados o en otro idioma. Se reescriben a palabras
+    # antes de fragmentar, porque expandirlos alarga el texto y eso cambia
+    # dónde caen los cortes.
+    spoken_text = normalize_spanish(text)
+
     if request.model_id not in SUPPORTED_MODELS:
         raise HTTPException(
             status_code=400,
@@ -1906,7 +1913,7 @@ def generate(request: GenerateRequest):
 
     STATUS.start_request()
     MODEL_MANAGER.begin_generation(
-        max(STUCK_MINIMUM_SECONDS, len(text) * STUCK_SECONDS_PER_CHAR)
+        max(STUCK_MINIMUM_SECONDS, len(spoken_text) * STUCK_SECONDS_PER_CHAR)
     )
     STATUS.set(
         "checking",
@@ -1923,7 +1930,7 @@ def generate(request: GenerateRequest):
 
     try:
         wav, sample_rate, backend = MODEL_MANAGER.generate(
-            text=text,
+            text=spoken_text,
             voice_path=voice_path,
             ref_text=ref_text,
             language=request.language,
@@ -2046,6 +2053,7 @@ def generate(request: GenerateRequest):
             "history": history_item,
             "qwen_sampling": generation,
             "removed_characters": removed,
+            "spoken_text": spoken_text if spoken_text != text else None,
         }
     except GenerationCancelled as exc:
         STATUS.set("idle", "Motor listo", "Generación cancelada por el usuario.", MODEL_MANAGER.backend)
@@ -2225,6 +2233,16 @@ def packaging_self_test() -> int:
     check("huggingface_hub", lambda: __import__("huggingface_hub").__version__)
 
     check("pipeline de audio", audio_pipeline_probe)
+
+    def normalizacion_check():
+        # Módulo local: si PyInstaller no lo empaqueta, el motor arranca y
+        # falla al generar. Se comprueba ejecutándolo, no solo importándolo.
+        salida = normalize_spanish("S/ 25.50 a las 3:30 pm del 15/08/2026")
+        if "veinticinco soles" not in salida or "de la tarde" not in salida:
+            raise RuntimeError(f"Normalización inesperada: {salida!r}")
+        return "normalize_spanish OK"
+
+    check("normalización de texto", normalizacion_check)
 
     def qwen_check():
         from importlib.util import find_spec
