@@ -103,5 +103,91 @@ class PromptCacheTest(unittest.TestCase):
         self.assertIn(f"voz-{server.PROMPT_CACHE_MAX + 2}", manager.prompt_cache)
 
 
+
+class FormatoDeSalidaTest(unittest.TestCase):
+    """MP3 lo escribe libsndfile; no añade dependencias al instalador."""
+
+    def setUp(self):
+        import numpy as np
+        self.tono = (0.3 * np.sin(2 * np.pi * 440 * np.arange(24000) / 24000)).astype("float32")
+
+    def _escribir(self, extension):
+        import soundfile as sf
+        import tempfile
+        with tempfile.TemporaryDirectory() as carpeta:
+            destino = Path(carpeta) / f"salida.{extension}"
+            server.write_audio(destino, self.tono, 24000, extension)
+            self.assertTrue(destino.exists() and destino.stat().st_size > 0)
+            return sf.info(str(destino))
+
+    def test_escribe_los_tres_formatos(self):
+        self.assertEqual(self._escribir("wav").format, "WAV")
+        self.assertEqual(self._escribir("flac").format, "FLAC")
+        self.assertEqual(self._escribir("mp3").format, "MP3")
+
+    def test_mp3_conserva_duracion_y_frecuencia(self):
+        info = self._escribir("mp3")
+        self.assertEqual(info.samplerate, 24000)
+        self.assertAlmostEqual(info.duration, 1.0, delta=0.1)
+
+    def test_mp3_pesa_mucho_menos_que_wav(self):
+        import soundfile as sf, tempfile
+        with tempfile.TemporaryDirectory() as carpeta:
+            wav = Path(carpeta) / "a.wav"
+            mp3 = Path(carpeta) / "a.mp3"
+            server.write_audio(wav, self.tono, 24000, "wav")
+            server.write_audio(mp3, self.tono, 24000, "mp3")
+            self.assertLess(mp3.stat().st_size, wav.stat().st_size / 2)
+
+    def test_formato_desconocido_cae_en_wav(self):
+        # Nunca debe fallar la generación por un formato raro guardado en
+        # preferencias; se degrada a WAV en vez de reventar.
+        self.assertEqual(self._escribir("xyz").format, "WAV")
+
+    def test_tipos_mime_declarados(self):
+        self.assertEqual(server.AUDIO_MEDIA_TYPES[".mp3"], "audio/mpeg")
+        self.assertEqual(server.AUDIO_MEDIA_TYPES[".flac"], "audio/flac")
+
+
+class LongitudDeReferenciaTest(unittest.TestCase):
+    """
+    La fidelidad se estanca a los ~15 s y luego empeora, y una referencia
+    larga dispara el cuelgue sin token de fin. Por eso se recorta.
+    """
+
+    def _voz(self, segundos, sr=24000):
+        import numpy as np
+        n = int(segundos * sr)
+        t = np.arange(n) / sr
+        # Habla simulada: tono con silencios intercalados cada segundo.
+        y = (0.3 * np.sin(2 * np.pi * 180 * t)).astype("float32")
+        for k in range(1, int(segundos)):
+            y[int((k - 0.12) * sr):int(k * sr)] = 0.0
+        return y
+
+    def test_una_referencia_corta_no_se_toca(self):
+        corta = self._voz(12)
+        salida = server.limit_reference_length(corta, 24000)
+        self.assertEqual(len(salida), len(corta))
+
+    def test_una_referencia_larga_se_recorta(self):
+        salida = server.limit_reference_length(self._voz(40), 24000)
+        self.assertLessEqual(len(salida) / 24000, server.REFERENCE_MAX_SECONDS + 0.01)
+
+    def test_el_recorte_conserva_material_suficiente(self):
+        salida = server.limit_reference_length(self._voz(40), 24000)
+        self.assertGreaterEqual(len(salida) / 24000, server.REFERENCE_MIN_KEEP_SECONDS)
+
+    def test_el_recorte_cae_en_un_silencio(self):
+        import numpy as np
+        salida = server.limit_reference_length(self._voz(40), 24000)
+        # El final no debe quedar a mitad de palabra: la última muestra es
+        # parte de un tramo con voz, no un corte en seco a plena amplitud.
+        self.assertLess(float(np.abs(salida[-1])), 0.35)
+
+    def test_el_optimo_puntua_mas_que_una_referencia_larga(self):
+        self.assertGreater(server.REFERENCE_MAX_SECONDS, 15.0)
+        self.assertLess(server.REFERENCE_MAX_SECONDS, 25.0)
+
 if __name__ == "__main__":
     unittest.main()

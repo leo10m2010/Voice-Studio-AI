@@ -332,6 +332,7 @@ document.querySelector("#app").innerHTML = `
                 <select id="outputFormat">
                   <option value="wav">WAV · sin pérdida</option>
                   <option value="flac">FLAC · sin pérdida</option>
+                  <option value="mp3">MP3 · comprimido, para enviar</option>
                 </select>
                 ${icons.chevron}
               </div>
@@ -428,7 +429,7 @@ document.querySelector("#app").innerHTML = `
         <div class="import-summary" id="importSummary"></div>
         <ul class="import-tips">
           <li>Una sola persona y sin música.</li>
-          <li>Ideal práctico: 8–25 segundos limpios.</li>
+          <li><strong>Ideal: 10–15 segundos</strong> limpios. Más largo no mejora: la fidelidad se estanca y luego empeora.</li>
           <li>La transcripción exacta activa ICL y suele mejorar la fidelidad.</li>
         </ul>
         <label>Transcripción exacta
@@ -1168,7 +1169,10 @@ function stageFor(st){
 // elapsed time against the learned estimate, and the chunk being synthesized.
 function renderProgress(st){
   const elapsed=Number(st.elapsed_seconds||0);
-  if(!state.busy||elapsed<=0){el.generationProgress.hidden=true;return}
+  if(!state.busy||elapsed<=0){
+    el.generationProgress.hidden=true;
+    return;
+  }
   el.generationProgress.hidden=false;
 
   const estimated=state.generationEstimate;
@@ -1353,7 +1357,7 @@ async function saveTranscript(text){
 function openTranscript(){if(!state.voice)return toast("Primero selecciona una voz.");el.transcriptInput.value=state.voice.transcript||"";el.transcriptDialog.showModal();setTimeout(()=>el.transcriptInput.focus(),60)}
 function fileDuration(file){return new Promise(resolve=>{const a=document.createElement("audio"),u=URL.createObjectURL(file);a.preload="metadata";a.onloadedmetadata=()=>{const d=a.duration;URL.revokeObjectURL(u);resolve(Number.isFinite(d)?d:null)};a.onerror=()=>{URL.revokeObjectURL(u);resolve(null)};a.src=u})}
 async function prepareImport(file){
-  state.pendingVoiceFile=file;const d=await fileDuration(file),note=d==null?"No se pudo leer duración":d<3?"Muy corto para Qwen":d<=8?"Válido; una referencia más rica puede ayudar":d<=25?"Rango recomendado":d<=35?"Utilizable; revisa que todo sea consistente":"Referencia larga; usa solo un tramo limpio si la voz cambia";
+  state.pendingVoiceFile=file;const d=await fileDuration(file),note=d==null?"No se pudo leer duración":d<3?"Muy corto para Qwen":d<8?"Válido; con 10–15 s el clon sale mejor":d<=15?"Rango óptimo":d<=18?"Bien; el óptimo está en 10–15 s":"Se recortará a 18 s en el silencio más cercano";
   el.importSummary.innerHTML=`<strong>${esc(file.name)}</strong><span>${d?`${d.toFixed(1)} s · `:""}${note}</span>`;el.importTranscript.value="";el.voiceImportDialog.showModal()
 }
 // Uploads go through api() so an engine that is down or wedged produces the

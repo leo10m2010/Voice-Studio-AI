@@ -38,10 +38,22 @@ class AudioPipelineProbeTest(unittest.TestCase):
 
         self.assertIn("OK", audio_pipeline_probe())
 
+    @staticmethod
+    def _purge(*prefixes: str) -> None:
+        for name in [
+            n
+            for n in sys.modules
+            if any(n == p or n.startswith(f"{p}.") for p in prefixes)
+        ]:
+            del sys.modules[name]
+
     def test_importing_librosa_alone_does_not_prove_it_works(self):
         blocker = BlockModule("sklearn")
-        for name in [n for n in sys.modules if n == "sklearn" or n.startswith("sklearn.")]:
-            del sys.modules[name]
+        # librosa engancha sus submódulos con lazy_loader, pero una vez
+        # resueltos quedan cacheados en el propio módulo: si otra prueba ya
+        # tocó librosa.effects, bloquear sklearn no cambiaría nada y esta
+        # prueba pasaría en falso. Por eso se descarga también librosa.
+        self._purge("librosa", "sklearn")
         sys.meta_path.insert(0, blocker)
         try:
             import librosa
@@ -56,6 +68,8 @@ class AudioPipelineProbeTest(unittest.TestCase):
                 audio_pipeline_probe()
         finally:
             sys.meta_path.remove(blocker)
+            # Deja el intérprete con una importación limpia para el resto.
+            self._purge("librosa", "sklearn")
 
 
 if __name__ == "__main__":

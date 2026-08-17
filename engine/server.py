@@ -118,6 +118,12 @@ MODEL_INSTALLER = ModelInstallRegistry(HF_HOME, SUPPORTED_MODELS)
 ALLOWED_AUDIO = {".wav", ".mp3", ".flac", ".ogg"}
 MAX_UPLOAD_MB = 80
 
+# La fidelidad del clon sube casi linealmente de 3 a 15 s, luego se estanca y
+# empeora. Pasarse además dispara el cuelgue en el que el modelo no emite el
+# token de fin, así que las referencias más largas se recortan.
+REFERENCE_MAX_SECONDS = 18.0
+REFERENCE_MIN_KEEP_SECONDS = 8.0
+
 # Por encima de ~100 caracteres la velocidad de habla se va acelerando hacia el
 # final del fragmento (issue #239 del repo oficial de Qwen3-TTS). Fragmentar a
 # 460 dejaba casi cualquier locución dentro de esa zona. 200 mantiene un spot
@@ -767,22 +773,29 @@ def analyze_reference_audio(audio_path: Path, transcript: str = "") -> dict:
         score = 0
         notes = []
 
-        # Official capability starts around 3 s. Community workflows commonly
-        # report practical success in roughly the 7–30 s range.
-        if 8.0 <= duration <= 25.0:
+        # La calidad sube de forma casi lineal de 3 a 15 s, ahí se estanca y
+        # después empeora; además una referencia larga es uno de los
+        # disparadores del cuelgue sin token de fin. Por eso el óptimo es
+        # 10–15 s y no "cuanto más, mejor".
+        if 10.0 <= duration <= 15.0:
             score += 30
-        elif 5.0 <= duration < 8.0 or 25.0 < duration <= 35.0:
-            score += 24
-            notes.append("La duración es utilizable; 8–25 s suele ser un rango práctico.")
+        elif 8.0 <= duration < 10.0 or 15.0 < duration <= 20.0:
+            score += 26
+        elif 5.0 <= duration < 8.0 or 20.0 < duration <= REFERENCE_MAX_SECONDS:
+            score += 20
+            notes.append("Duración utilizable; 10–15 s es donde el clon sale mejor.")
         elif 3.0 <= duration < 5.0:
-            score += 15
-            notes.append("Qwen puede clonar desde ~3 s, pero una referencia algo más larga suele ser más estable.")
+            score += 12
+            notes.append("Qwen clona desde ~3 s, pero con 10–15 s el resultado es bastante más estable.")
         elif duration < 3.0:
             score += 5
-            notes.append("Referencia muy corta: intenta usar al menos 3 s y preferiblemente más.")
+            notes.append("Referencia muy corta: usa al menos 3 s, idealmente 10–15 s.")
         else:
-            score += 14
-            notes.append("Referencia larga: prioriza 8–25 s del estilo de voz que realmente quieres conservar.")
+            score += 10
+            notes.append(
+                f"Referencia larga: se recortará a {REFERENCE_MAX_SECONDS:.0f} s. "
+                "Pasados los 15 s la calidad deja de subir y puede empeorar."
+            )
 
         if -28.0 <= rms_dbfs <= -12.0:
             score += 20
@@ -843,6 +856,36 @@ def analyze_reference_audio(audio_path: Path, transcript: str = "") -> dict:
         }
 
 
+def limit_reference_length(y, sample_rate: int):
+    """
+    Acorta una referencia demasiado larga cortando en un silencio.
+
+    La fidelidad del clon sube casi linealmente hasta ~15 s, ahí se estanca y
+    después empeora; y una referencia larga es además uno de los disparadores
+    del cuelgue en el que el modelo nunca emite el token de fin. Cortar en
+    seco a mitad de palabra dejaría un final abrupto que el clon imita, así
+    que se busca el último silencio antes del límite.
+    """
+    import librosa
+    import numpy as np
+
+    limite = int(REFERENCE_MAX_SECONDS * sample_rate)
+    if y.size <= limite:
+        return y
+
+    minimo = int(REFERENCE_MIN_KEEP_SECONDS * sample_rate)
+    try:
+        tramos = librosa.effects.split(y[:limite], top_db=35)
+    except Exception:
+        tramos = []
+
+    for inicio, fin in reversed(list(tramos)):
+        if fin >= minimo:
+            return np.ascontiguousarray(y[:fin])
+
+    return np.ascontiguousarray(y[:limite])
+
+
 def prepare_reference_audio(audio_path: Path, force: bool = False) -> tuple[Path, dict]:
     """
     Creates a conservative 24 kHz mono reference:
@@ -882,6 +925,8 @@ def prepare_reference_audio(audio_path: Path, force: bool = False) -> tuple[Path
         y, _ = librosa.effects.trim(y, top_db=35)
     if not y.size:
         y = np.zeros(2400, dtype=np.float32)
+
+    y = limit_reference_length(y, 24000)
 
     y = y - float(np.mean(y))
     rms = float(np.sqrt(np.mean(np.square(y)) + 1e-12))
@@ -1063,6 +1108,28 @@ def estimate_max_new_tokens(text: str) -> int:
     words = max(1, len(re.findall(r"\b\w+\b", text, flags=re.UNICODE)))
     # 12 Hz audio tokenizer. Rough margin based on normal Spanish speech rates.
     return int(clamp(words * 6 + 160, 384, 2048))
+
+
+AUDIO_MEDIA_TYPES = {
+    ".wav": "audio/wav",
+    ".flac": "audio/flac",
+    ".mp3": "audio/mpeg",
+}
+
+# MP3 lo escribe libsndfile desde la 1.1, así que no añade dependencias ni
+# engorda el instalador. Es el formato que piden las emisoras y el que cabe en
+# WhatsApp: un spot de 10 s pasa de ~470 KB en WAV a ~40 KB.
+_SOUNDFILE_FORMATS = {"wav": "WAV", "flac": "FLAC", "mp3": "MP3"}
+
+
+def write_audio(path: Path, samples, sample_rate: int, extension: str) -> None:
+    """Escribe el resultado en el formato pedido, con WAV como respaldo."""
+    import soundfile as sf
+
+    fmt = _SOUNDFILE_FORMATS.get(extension.lower())
+    if fmt is None or fmt not in sf.available_formats():
+        fmt = "WAV"
+    sf.write(str(path), samples, sample_rate, format=fmt)
 
 
 def load_history() -> list[dict]:
@@ -1438,7 +1505,7 @@ class GenerateRequest(BaseModel):
     style_exaggeration: float = 0.0
     pitch_semitones: float = 0.0
     speaker_boost: bool = True
-    output_format: Literal["wav", "flac"] = "wav"
+    output_format: Literal["wav", "flac", "mp3"] = "wav"
     music_id: Optional[str] = None
     music_volume: float = 0.18
     request_id: str = ""
@@ -1672,7 +1739,7 @@ def output_audio(filename: str):
     path = OUTPUTS_DIR / safe
     if not path.exists():
         raise HTTPException(status_code=404, detail="Resultado no encontrado.")
-    media = "audio/flac" if path.suffix.lower() == ".flac" else "audio/wav"
+    media = AUDIO_MEDIA_TYPES.get(path.suffix.lower(), "audio/wav")
     return FileResponse(path, media_type=media)
 
 
@@ -1986,10 +2053,7 @@ def generate(request: GenerateRequest):
         filename = f"locucion_{int(time.time())}_{uuid.uuid4().hex[:5]}.{extension}"
         output_path = OUTPUTS_DIR / filename
 
-        if extension == "flac":
-            sf.write(str(output_path), wav, sample_rate, format="FLAC")
-        else:
-            sf.write(str(output_path), wav, sample_rate, format="WAV")
+        write_audio(output_path, wav, sample_rate, extension)
 
         history_item = {
             "id": uuid.uuid4().hex,
@@ -2147,10 +2211,7 @@ def set_history_music(history_id: str, request: HistoryMusicRequest):
     music_name = pretty_name(music_path.name)
     filename = f"locucion_{int(time.time())}_{uuid.uuid4().hex[:5]}.{extension}"
     output_path = OUTPUTS_DIR / filename
-    if extension == "flac":
-        sf.write(str(output_path), mixed, sample_rate, format="FLAC")
-    else:
-        sf.write(str(output_path), mixed, sample_rate, format="WAV")
+    write_audio(output_path, mixed, sample_rate, extension)
 
     item["filename"] = filename
     item["url"] = f"/api/outputs/{filename}"
