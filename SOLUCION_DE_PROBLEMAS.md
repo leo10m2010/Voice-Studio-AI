@@ -52,6 +52,63 @@ audio completo (`librosa.load`, `effects.trim`, `time_stretch`, `pitch_shift`,
 ese self-test sobre el motor descargado **antes** de activarlo. Un motor con
 este defecto se rechaza durante la instalación.
 
+### "Error del motor" al generar, y en el registro `device-side assert`
+
+Síntoma: la generación falla al instante y el aviso muestra un texto largo
+sobre `CUDA error: device-side assert triggered`, `CUDA_LAUNCH_BLOCKING=1` y
+`TORCH_USE_CUDA_DSA`. Reintentar da exactamente el mismo error. En el registro
+aparece la línea que importa:
+
+```text
+TensorCompare.cu:109: Assertion `input[0] != 0` failed.
+```
+
+Causa: el motor cargaba el modelo en **fp16**. Los pesos tienen un rango que
+fp16 no cubre —se corta en 65504—, así que las activaciones desbordaban a
+infinito, el softmax devolvía NaN y `torch.multinomial` abortaba; ese `assert`
+es su comprobación de "probability tensor contains either inf, nan or element
+< 0".
+
+No dependía de la tarjeta: fallaba igual en una RTX 4070 recién instalada y en
+el equipo antiguo. **Ninguna locución en GPU llegó nunca a completarse.**
+
+Solución: actualizar el motor a **1.0.4** o posterior, que carga en **fp32**.
+La app pide la actualización sola al abrir.
+
+Se probaron los tres dtypes en una RTX 4070 con muestreo determinista, misma
+frase y misma voz:
+
+| dtype | resultado | audio | tiempo |
+|---|---|---|---|
+| fp16 | aborta el proceso | — | — |
+| bf16 | degrada: no cierra la locución | 13.92 s, rms 0.032 | 23.8 s |
+| **fp32** | **correcto** | **4.40 s, rms 0.070** | **6.5 s** |
+| CPU (fp32) | correcto, de referencia | 4.24 s, rms 0.075 | 16.0 s |
+
+bf16 no revienta pero sobra: con 8 bits de mantisa el modelo deja de cerrar
+bien la locución y devuelve el triple de audio. fp32 en GPU coincide con CPU y
+sigue siendo 2.5x más rápido, así que es lo que se usa.
+
+El coste es memoria: fp32 ocupa el doble que fp16 y el 0.6B llega a **5.29 GB
+asignados / 5.73 GB reservados** con un guion largo. Por eso la VRAM exigida
+para elegir GPU subió de 2.5 GB a **6 GB** (y de 5 a 11 GB en el modelo 1.7B).
+Una tarjeta con menos irá a CPU: más lenta, pero correcta, que es mejor que el
+error de antes.
+
+`QWEN_ENGINE_CUDA_DTYPE=bfloat16` fuerza bf16 para comparar. fp16 se ignora
+aunque se pida: es el dtype que abortaba el proceso.
+
+Dos cosas más cambiaron a raíz de esto:
+
+- Un fallo de kernel corrompe el contexto CUDA del **proceso entero**: a partir
+  de ahí toda operación en GPU falla, por eso reintentar no servía de nada. Ahora
+  el motor lo detecta, descarta la GPU para lo que queda de sesión y **termina
+  el trabajo en CPU** en vez de devolver error. El diagnóstico dice
+  `GPU descartada en esta sesión: …` y la línea de hardware muestra
+  "GPU fuera de servicio". Reiniciar la app la devuelve al servicio.
+- El aviso ya no vuelca la traza de PyTorch. El texto completo queda en el
+  registro del motor, que es donde sirve.
+
 ### El motor no responde al abrir la app
 
 Aparece el aviso "El motor local no se pudo iniciar" con Reintentar y

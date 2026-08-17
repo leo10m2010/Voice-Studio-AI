@@ -2,7 +2,7 @@ import "./styles.css";
 
 const API = "http://127.0.0.1:8765";
 const DEFAULT_MODEL_ID = "Qwen/Qwen3-TTS-12Hz-0.6B-Base";
-const REQUIRED_ENGINE_VERSION = "1.0.3";
+const REQUIRED_ENGINE_VERSION = "1.0.4";
 
 const icons = {
   wave: `<svg viewBox="0 0 24 24"><path d="M4 13v-2M8 17V7M12 20V4M16 16V8M20 13v-2"/></svg>`,
@@ -1533,8 +1533,14 @@ function scheduleWarmUpRefresh(){
   scheduleWarmUpRefresh.t=setTimeout(()=>{refreshData().catch(()=>{})},3000);
 }
 function updateHardwareHint(){
-  const sys=state.system;if(!sys)return;const m=selectedModel(),need=Number(m?.gpu_vram_recommended_gb||2.5),vram=Number(sys.vram_gb||0),auto=sys.cuda_available&&vram>=need?"CUDA":"CPU";
-  el.hardware.textContent=sys.cuda_available?`${sys.gpu_name} · ${vram.toFixed(1)} GB · Auto→${auto}`:"CPU · modo local";
+  const sys=state.system;if(!sys)return;
+  if(!sys.cuda_available){el.hardware.textContent="CPU · modo local";return;}
+  const vram=Number(sys.vram_gb||0);
+  // cuda_usable lo añade el motor al descartar la GPU tras un fallo de kernel.
+  // Un motor anterior no lo manda, y ahí cuda_available sigue siendo la respuesta.
+  if(sys.cuda_usable===false){el.hardware.textContent=`${sys.gpu_name} · GPU fuera de servicio · Auto→CPU`;return;}
+  const m=selectedModel(),need=Number(m?.gpu_vram_recommended_gb||6);
+  el.hardware.textContent=`${sys.gpu_name} · ${vram.toFixed(1)} GB · Auto→${vram>=need?"CUDA":"CPU"}`;
 }
 function switchTab(tab){
   closeAllSheets();
@@ -1684,7 +1690,7 @@ function configureEngineIntro(mode="install"){
   el.setupIntroKicker.textContent=updating?"ACTUALIZACIÓN REQUERIDA":"PRIMER INICIO";
   el.setupIntroTitle.textContent=updating?"Actualicemos el motor local.":"Preparamos el estudio por ti.";
   el.setupIntroBody.textContent=updating
-    ? `La versión ${REQUIRED_ENGINE_VERSION} añade instalación y detección de modelos sin abrir terminales. Tus voces y modelos guardados se conservarán.`
+    ? `La versión ${REQUIRED_ENGINE_VERSION} corrige el fallo que impedía generar con tarjeta gráfica. Tus voces y modelos guardados se conservarán.`
     : "Voice Studio AI descargará su motor de voz de forma segura. No necesitas instalar Python, PyTorch ni abrir una terminal.";
   el.installEngineButton.textContent=updating?"Actualizar motor":"Preparar Voice Studio AI";
 }
@@ -1891,7 +1897,8 @@ async function buildDiagnosticsReport(){
   try{
     const system=await api("/api/system");
     lines.push(`Torch: ${system.torch_version||"—"} · CUDA: ${system.cuda_available?system.cuda_version:"no"}`);
-    lines.push(`GPU: ${system.gpu_name||"CPU"} ${system.vram_gb?`· ${system.vram_gb} GB`:""}`);
+    lines.push(`GPU: ${system.gpu_name||"CPU"} ${system.vram_gb?`· ${system.vram_gb} GB`:""}${system.compute_capability?` · cc ${system.compute_capability}`:""}${system.compute_dtype?` · ${system.compute_dtype}`:""}`);
+    if(system.cuda_disabled_reason)lines.push(`GPU descartada en esta sesión: ${system.cuda_disabled_reason}`);
     if(system.python_error)lines.push(`Error de Python: ${system.python_error}`);
   }catch{
     lines.push("Torch/GPU: sin datos (el motor no respondió).");

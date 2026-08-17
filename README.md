@@ -692,3 +692,40 @@ Fixes `E0505` in the Engine Manager catalog by making
 - shows `Sin instalar`, `Instalando`, `Instalado` and recovery states in the UI;
 - requires engine `1.0.2` and guides older installations through the visual
   engine updater before opening the workspace.
+
+
+---
+
+# engine 1.0.4 — GPU synthesis fix
+
+The engine loaded Qwen3-TTS in fp16. Its weights hold a range fp16 cannot cover
+— it stops at 65504 — so activations overflowed to infinity, softmax returned
+NaN and `torch.multinomial` aborted the CUDA context with
+`TensorCompare.cu: Assertion input[0] != 0 failed`, its own check for
+"probability tensor contains either inf, nan or element < 0".
+
+It never depended on the card: it failed identically on a fresh RTX 4070 and on
+an older machine. No GPU generation had ever completed.
+
+All three dtypes were measured on an RTX 4070 with deterministic sampling, same
+sentence and voice:
+
+| dtype | result | audio | wall clock |
+|---|---|---|---|
+| fp16 | aborts the process | — | — |
+| bf16 | degrades: never closes the take | 13.92 s, rms 0.032 | 23.8 s |
+| **fp32** | **correct** | **4.40 s, rms 0.070** | **6.5 s** |
+| CPU (fp32) | correct, the reference | 4.24 s, rms 0.075 | 16.0 s |
+
+- loads on GPU in fp32, which matches CPU output and is still 2.5x faster;
+  fp16 is never used, and bf16 only behind `QWEN_ENGINE_CUDA_DTYPE=bfloat16`;
+- raises the VRAM a card needs before `auto` picks CUDA from 2.5 GB to 6 GB
+  (5 GB to 11 GB for the 1.7B): fp32 takes twice the memory and the 0.6B peaks
+  at 5.29 GB allocated / 5.73 GB reserved on a long script;
+- drops the GPU for the rest of the session after a kernel fault — it corrupts
+  the whole process's CUDA context, which is why retrying returned the same 500
+  five times in a row — and finishes the job on CPU instead of failing;
+- reports a readable cause instead of a PyTorch backtrace, and writes the full
+  traceback to the engine log, where the diagnostics button picks it up;
+- requires engine `1.0.4`, so existing installations are offered the update on
+  open.

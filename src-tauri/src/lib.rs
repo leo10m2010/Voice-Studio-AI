@@ -386,10 +386,12 @@ fn detect_hardware_value() -> HardwareInfo {
                         .filter(|x| !x.is_empty())
                         .map(|x| x.to_string());
                     let vram_gb = vram_mb.map(|mb| mb / 1024.0);
-                    // Igual que VRAM_REQUIRED_GB en el motor: el 0.6B entra
-                    // en ~2 GB en fp16, así que una tarjeta de 4 GB merece el
-                    // runtime CUDA en vez del de CPU.
-                    let recommended_flavor = if vram_gb.unwrap_or(0.0) >= 2.5 {
+                    // Igual que VRAM_REQUIRED_GB en el motor, que ahora carga
+                    // en fp32: el 0.6B llega a 5.29 GB con un guion largo. Con
+                    // el 2.5 anterior —heredado de suponer fp16— una tarjeta
+                    // de 4 GB se bajaba el runtime CUDA entero para acabar
+                    // generando en CPU igual. Si se cambia aquí, cambiar allí.
+                    let recommended_flavor = if vram_gb.unwrap_or(0.0) >= 6.0 {
                         "nvidia"
                     } else {
                         "cpu"

@@ -265,5 +265,146 @@ class RemuestreoTest(unittest.TestCase):
         self.assertLessEqual(float(np.max(np.abs(salida))), 1.05)
 
 
+class FakeTorch:
+    """Los dtypes de torch solo se comparan por identidad aquí."""
+
+    bfloat16 = "bfloat16"
+    float16 = "float16"
+    float32 = "float32"
+
+
+class CudaDtypeTest(unittest.TestCase):
+    """
+    En GPU este modelo va en fp32, medido en una RTX 4070 con muestreo
+    determinista:
+
+      fp16   -> aborta el proceso (TensorCompare.cu: Assertion input[0] != 0)
+      bf16   -> 13.92 s de audio, rms 0.032   (mal: no cierra la locución)
+      fp32   -> 4.40 s, rms 0.070             (coincide con CPU: 4.24 s, 0.075)
+
+    Por fp16 no se completó nunca una locución en GPU, ni en la 4070 ni en el
+    equipo antiguo.
+    """
+
+    def setUp(self):
+        self.addCleanup(setattr, server, "CUDA_COMPUTE_DTYPE", server.CUDA_COMPUTE_DTYPE)
+
+    def test_por_defecto_es_fp32(self):
+        server.CUDA_COMPUTE_DTYPE = "float32"
+        self.assertEqual(server.cuda_dtype_name(), "float32")
+        self.assertEqual(server.resolve_cuda_dtype(FakeTorch), FakeTorch.float32)
+
+    def test_fp16_no_es_elegible_ni_pidiéndolo(self):
+        # Es el dtype que abortaba el proceso: dejarlo elegible solo serviría
+        # para reproducir el fallo.
+        server.CUDA_COMPUTE_DTYPE = "float16"
+        self.assertEqual(server.cuda_dtype_name(), "float32")
+        self.assertEqual(server.resolve_cuda_dtype(FakeTorch), FakeTorch.float32)
+
+    def test_bf16_solo_si_se_pide_por_entorno(self):
+        server.CUDA_COMPUTE_DTYPE = "bfloat16"
+        self.assertEqual(server.resolve_cuda_dtype(FakeTorch), FakeTorch.bfloat16)
+
+    def test_un_valor_raro_no_rompe(self):
+        server.CUDA_COMPUTE_DTYPE = "cualquier-cosa"
+        self.assertEqual(server.resolve_cuda_dtype(FakeTorch), FakeTorch.float32)
+
+
+class VramRequirementTest(unittest.TestCase):
+    """El 0.6B en fp32 llega a 5.29 GB asignados / 5.73 GB reservados con un
+    guion largo. Las cifras viejas (2.5 / 5.0) suponían fp16."""
+
+    def test_cubre_el_pico_medido_del_modelo_por_defecto(self):
+        self.assertGreaterEqual(server.vram_required_gb(server.DEFAULT_MODEL_ID), 5.73)
+
+    def test_el_modelo_grande_pide_más_que_el_pequeño(self):
+        self.assertGreater(
+            server.vram_required_gb("Qwen/Qwen3-TTS-12Hz-1.7B-Base"),
+            server.vram_required_gb(server.DEFAULT_MODEL_ID),
+        )
+
+    def test_modelo_desconocido_usa_el_valor_por_defecto(self):
+        self.assertEqual(
+            server.vram_required_gb("no/existe"),
+            server.DEFAULT_VRAM_REQUIRED_GB,
+        )
+
+    def test_lo_que_ve_la_interfaz_coincide_con_lo_que_decide_el_motor(self):
+        # updateHardwareHint() usa gpu_vram_recommended_gb para dibujar
+        # "Auto→CUDA/CPU". Si divergiera de choose_backend(), la app anunciaría
+        # una cosa y haría otra.
+        for model_id in server.SUPPORTED_MODELS:
+            with self.subTest(model_id=model_id):
+                self.assertEqual(
+                    server.SUPPORTED_MODELS[model_id]["gpu_vram_recommended_gb"],
+                    server.vram_required_gb(model_id),
+                )
+
+
+class CudaFaultTest(unittest.TestCase):
+    """
+    Un device-side assert corrompe el contexto CUDA del proceso entero: todo lo
+    que venga después falla igual. En el registro se veían cinco POST
+    /api/generate seguidos devolviendo 500 sin que nada cambiara.
+    """
+
+    def setUp(self):
+        server.reset_cuda_fault()
+        self.addCleanup(server.reset_cuda_fault)
+
+    def test_reconoce_el_fallo_real_del_registro(self):
+        exc = RuntimeError(
+            "CUDA error: device-side assert triggered\n"
+            "CUDA kernel errors might be asynchronously reported at some other API call."
+        )
+        self.assertTrue(server.is_cuda_fault(exc))
+
+    def test_falta_de_memoria_no_descarta_la_gpu(self):
+        # Es recuperable y tiene su propio camino: un trabajo más corto sí cabría.
+        exc = RuntimeError("CUDA out of memory. Tried to allocate 2.00 GiB")
+        self.assertFalse(server.is_cuda_fault(exc))
+
+    def test_un_error_corriente_no_descarta_la_gpu(self):
+        self.assertFalse(server.is_cuda_fault(FileNotFoundError("falta el guion")))
+
+    def test_descartar_la_gpu_fuerza_cpu_en_modo_auto(self):
+        server.disable_cuda("RuntimeError: CUDA error: device-side assert triggered")
+        self.assertEqual(
+            server.MODEL_MANAGER.choose_backend("auto", server.DEFAULT_MODEL_ID),
+            "cpu",
+        )
+
+    def test_pedir_cuda_a_mano_lo_dice_en_vez_de_reventar(self):
+        server.disable_cuda("RuntimeError: CUDA error: device-side assert triggered")
+        with self.assertRaises(RuntimeError) as caught:
+            server.MODEL_MANAGER.choose_backend("cuda", server.DEFAULT_MODEL_ID)
+        self.assertIn("Reinicia la app", str(caught.exception))
+
+    def test_solo_se_guarda_el_primer_motivo(self):
+        server.disable_cuda("primero")
+        server.disable_cuda("segundo")
+        self.assertEqual(server.cuda_fault_reason(), "primero")
+
+
+class FriendlyErrorTest(unittest.TestCase):
+    """El volcado crudo de un fallo CUDA son diez líneas sobre CUDA_LAUNCH_BLOCKING
+    y TORCH_USE_CUDA_DSA: depuración de PyTorch, no algo que ayude a locutar."""
+
+    def test_el_fallo_cuda_se_traduce(self):
+        mensaje = server.friendly_generation_error(
+            RuntimeError("CUDA error: device-side assert triggered")
+        )
+        self.assertNotIn("device-side", mensaje)
+        self.assertIn("CPU", mensaje)
+
+    def test_la_falta_de_memoria_dice_qué_hacer(self):
+        mensaje = server.friendly_generation_error(RuntimeError("CUDA out of memory."))
+        self.assertIn("memoria", mensaje)
+
+    def test_los_demás_errores_se_muestran_tal_cual(self):
+        mensaje = server.friendly_generation_error(ValueError("voz no encontrada"))
+        self.assertIn("voz no encontrada", mensaje)
+
+
 if __name__ == "__main__":
     unittest.main()

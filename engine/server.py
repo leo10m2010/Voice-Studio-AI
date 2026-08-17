@@ -10,6 +10,7 @@ import shutil
 import sys
 import threading
 import time
+import traceback
 import uuid
 from collections import OrderedDict
 from pathlib import Path
@@ -35,16 +36,40 @@ from model_install import ModelInstallRegistry
 
 DEFAULT_MODEL_ID = "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
 
-# VRAM mínima para correr el modelo en fp16, con margen para el tokenizer 12Hz,
-# la caché KV y las activaciones. El 0.6B pesa ~1.2 GB en fp16; pedir 5.5 GB
-# mandaba a CPU tarjetas de 4 GB que lo corren de sobra, y en CPU este modelo
-# va ~11x más lento que tiempo real. Si aun así no entra, choose_backend()
-# reintenta en CPU al detectar OOM, así que quedarse corto no rompe nada.
+# En GPU este modelo va en fp32. Ni fp16 ni bf16 sirven, y ninguna de las dos
+# cosas depende de la tarjeta.
+#
+# fp16 revienta. Los pesos tienen un rango que fp16 no cubre —se corta en
+# 65504—, así que las activaciones desbordan a inf, el softmax devuelve NaN y
+# torch.multinomial aborta el proceso:
+#
+#   TensorCompare.cu:109: Assertion `input[0] != 0` failed
+#
+# que es su comprobación de "probability tensor contains either inf, nan or
+# element < 0". Fallaba en el primer muestreo, siempre, tanto en una RTX 4070
+# como en un equipo antiguo: nunca llegó a completarse una locución en GPU.
+#
+# bf16 no revienta, pero degrada. Tiene el rango de fp32 con 8 bits de mantisa,
+# y con ese margen el modelo deja de cerrar bien la locución: medido en una
+# 4070 con muestreo determinista, la misma frase daba 13.92 s de audio (rms
+# 0.032) frente a 4.40 s (rms 0.070) en fp32. fp32 en GPU sí coincide con CPU
+# (4.24 s, rms 0.075), que es la referencia buena.
+#
+# fp32 en GPU sigue mereciendo la pena: 6.5 s para esa frase contra 16.0 s en
+# CPU, 2.5x más rápido.
+CUDA_COMPUTE_DTYPE = (os.environ.get("QWEN_ENGINE_CUDA_DTYPE") or "float32").lower()
+
+# VRAM mínima para elegir GPU, con margen para el tokenizer 12Hz, la caché KV y
+# las activaciones. Medido, no estimado: el 0.6B en fp32 con un guion largo
+# llega a 5.29 GB asignados y 5.73 GB reservados en una RTX 4070. Las cifras
+# anteriores (2.5 / 5.0) venían de suponer fp16 y se quedaban cortas.
+# Quedarse corto tampoco rompe: choose_backend() reintenta en CPU al detectar
+# falta de memoria.
 VRAM_REQUIRED_GB = {
-    "Qwen/Qwen3-TTS-12Hz-0.6B-Base": 2.5,
-    "Qwen/Qwen3-TTS-12Hz-1.7B-Base": 5.0,
+    "Qwen/Qwen3-TTS-12Hz-0.6B-Base": 6.0,
+    "Qwen/Qwen3-TTS-12Hz-1.7B-Base": 11.0,
 }
-DEFAULT_VRAM_REQUIRED_GB = 2.5
+DEFAULT_VRAM_REQUIRED_GB = 6.0
 
 SUPPORTED_MODELS = {
     "Qwen/Qwen3-TTS-12Hz-0.6B-Base": {
@@ -54,7 +79,7 @@ SUPPORTED_MODELS = {
         "engine": "qwen",
         "recommended": True,
         "disk_gb": 2.52,
-        "gpu_vram_recommended_gb": 2.5,
+        "gpu_vram_recommended_gb": 6.0,
         "description": "Recomendado. Mejor equilibrio para este equipo y clonación local.",
         "license": "apache-2.0",
         "spanish": True,
@@ -66,7 +91,7 @@ SUPPORTED_MODELS = {
         "engine": "qwen",
         "recommended": False,
         "disk_gb": 4.54,
-        "gpu_vram_recommended_gb": 5.0,
+        "gpu_vram_recommended_gb": 11.0,
         "description": "Más pesado. Puede mejorar calidad, pero requiere bastante más memoria.",
         "license": "apache-2.0",
         "spanish": True,
@@ -515,35 +540,181 @@ def clear_generation_cancelled(request_id: str) -> None:
         _CANCELLED_REQUESTS.discard(request_id)
 
 
+_CUDA_FAULT_LOCK = threading.Lock()
+_CUDA_FAULT_REASON: Optional[str] = None
+
+
+def cuda_fault_reason() -> Optional[str]:
+    with _CUDA_FAULT_LOCK:
+        return _CUDA_FAULT_REASON
+
+
+def disable_cuda(reason: str) -> None:
+    """
+    Retira la GPU de lo que queda de sesión.
+
+    Un fallo de kernel (device-side assert) no se limita a la llamada que lo
+    provocó: corrompe el contexto CUDA del proceso entero, así que a partir de
+    ahí *cualquier* operación en GPU falla igual. Reintentar en CUDA no puede
+    salir bien, y en el registro se veía exactamente eso: cinco POST
+    /api/generate seguidos devolviendo 500 sin que nada cambiara.
+
+    Solo lo cura reemplazar el proceso. Mientras tanto, marcarlo permite seguir
+    generando en CPU en vez de dejar la app inservible hasta reiniciarla.
+    """
+    global _CUDA_FAULT_REASON
+    with _CUDA_FAULT_LOCK:
+        if _CUDA_FAULT_REASON is None:
+            _CUDA_FAULT_REASON = reason
+            print(f"[cuda] GPU desactivada para esta sesión: {reason}")
+
+
+def reset_cuda_fault() -> None:
+    global _CUDA_FAULT_REASON
+    with _CUDA_FAULT_LOCK:
+        _CUDA_FAULT_REASON = None
+
+
+def is_cuda_fault(exc: BaseException) -> bool:
+    """
+    Distingue un contexto CUDA roto de una GPU que solo se quedó sin memoria.
+
+    Falta de memoria es recuperable y ya tiene su propio camino: se reintenta en
+    CPU sin descartar la GPU, porque un trabajo más corto sí cabría después.
+    """
+    text = f"{type(exc).__name__}: {exc}".lower()
+    if "out of memory" in text:
+        return False
+    return any(
+        marker in text
+        for marker in (
+            "device-side assert",
+            "cuda error",
+            "acceleratorerror",
+            "cuda kernel errors",
+            "cublas",
+            "cudnn_status",
+            "no kernel image is available",
+            "illegal memory access",
+        )
+    )
+
+
+def friendly_generation_error(exc: BaseException) -> str:
+    """
+    Lo que ve el usuario cuando la generación falla.
+
+    El volcado crudo de un fallo CUDA son diez líneas sobre cudaErrorAssert,
+    CUDA_LAUNCH_BLOCKING y TORCH_USE_CUDA_DSA: instrucciones para depurar
+    PyTorch, no para locutar un spot. Se resume y se dice qué hacer, dejando el
+    texto completo en el registro, que es donde sirve.
+    """
+    raw = f"{type(exc).__name__}: {exc}"
+    if is_cuda_fault(exc):
+        return (
+            "La tarjeta gráfica falló durante la síntesis y quedó inutilizable "
+            "hasta reiniciar la app. Vuelve a intentarlo: se generará en CPU, "
+            "más lento pero fiable. El detalle técnico está en el registro del "
+            "motor."
+        )
+    if "out of memory" in raw.lower():
+        return (
+            "La GPU se quedó sin memoria. Cierra otros programas que la usen, "
+            "o cambia el modo a CPU en Ajustes."
+        )
+    return raw
+
+
+def describe_cuda_fault(exc: BaseException) -> str:
+    first_line = str(exc).strip().splitlines()[0] if str(exc).strip() else ""
+    return f"{type(exc).__name__}: {first_line}" if first_line else type(exc).__name__
+
+
+def cuda_dtype_name() -> str:
+    """
+    Nombre del dtype de GPU. fp16 se ignora aunque lo pidan por entorno: es el
+    que abortaba el proceso, y dejarlo elegible solo serviría para reproducir
+    el fallo. Ver el comentario de CUDA_COMPUTE_DTYPE.
+    """
+    if CUDA_COMPUTE_DTYPE == "bfloat16":
+        return "bfloat16"
+    return "float32"
+
+
+def resolve_cuda_dtype(torch):
+    return torch.bfloat16 if cuda_dtype_name() == "bfloat16" else torch.float32
+
+
+def vram_required_gb(model_id: str) -> float:
+    model_info = SUPPORTED_MODELS.get(model_id) or {}
+    return float(
+        model_info.get("gpu_vram_recommended_gb")
+        or VRAM_REQUIRED_GB.get(model_id, DEFAULT_VRAM_REQUIRED_GB)
+    )
+
+
+_GPU_PROBE: Optional[dict] = None
+
+
+def probe_gpu(torch) -> Optional[dict]:
+    """
+    Lee nombre, VRAM y capacidad de cómputo una sola vez.
+
+    Se cachea porque no cambian durante la sesión y porque, tras un fallo de
+    kernel, volver a preguntárselo a CUDA lanza excepción: sin la copia, el
+    diagnóstico pasaría a decir "sin NVIDIA detectada" justo cuando más falta
+    hace saber qué tarjeta es.
+    """
+    global _GPU_PROBE
+    if _GPU_PROBE is not None:
+        return _GPU_PROBE
+    try:
+        properties = torch.cuda.get_device_properties(0)
+        major, minor = torch.cuda.get_device_capability(0)
+        _GPU_PROBE = {
+            "gpu_name": torch.cuda.get_device_name(0),
+            "vram_gb": round(properties.total_memory / (1024**3), 2),
+            "capability": (int(major), int(minor)),
+        }
+    except Exception:
+        return None
+    return _GPU_PROBE
+
+
 def torch_info() -> dict:
     try:
         import torch
 
-        cuda = bool(torch.cuda.is_available())
+        fault = cuda_fault_reason()
+        present = bool(torch.cuda.is_available())
         result = {
             "python_ready": True,
             "python_error": None,
             "torch_version": torch.__version__,
-            "cuda_available": cuda,
+            "cuda_available": present,
+            # La GPU existe pero está descartada tras un fallo de kernel.
+            "cuda_usable": present and fault is None,
+            "cuda_disabled_reason": fault,
             "cuda_version": getattr(torch.version, "cuda", None),
             "gpu_name": None,
             "vram_gb": None,
             "compute_capability": None,
+            "compute_dtype": None,
             "recommended_mode": "cpu",
         }
 
-        if cuda:
-            properties = torch.cuda.get_device_properties(0)
-            vram_gb = properties.total_memory / (1024**3)
-            capability = torch.cuda.get_device_capability(0)
+        probe = probe_gpu(torch) if present else None
+        if probe:
+            capability = probe["capability"]
+            fits = probe["vram_gb"] >= vram_required_gb(DEFAULT_MODEL_ID)
             result.update(
                 {
-                    "gpu_name": torch.cuda.get_device_name(0),
-                    "vram_gb": round(vram_gb, 2),
+                    "gpu_name": probe["gpu_name"],
+                    "vram_gb": probe["vram_gb"],
                     "compute_capability": f"{capability[0]}.{capability[1]}",
-                    # Conservative threshold for the official PyTorch model.
+                    "compute_dtype": cuda_dtype_name(),
                     "recommended_mode": (
-                        "cuda" if vram_gb >= DEFAULT_VRAM_REQUIRED_GB else "cpu"
+                        "cuda" if fits and fault is None else "cpu"
                     ),
                 }
             )
@@ -554,10 +725,13 @@ def torch_info() -> dict:
             "python_error": f"{type(exc).__name__}: {exc}",
             "torch_version": None,
             "cuda_available": False,
+            "cuda_usable": False,
+            "cuda_disabled_reason": None,
             "cuda_version": None,
             "gpu_name": None,
             "vram_gb": None,
             "compute_capability": None,
+            "compute_dtype": None,
             "recommended_mode": "cpu",
         }
 
@@ -1305,17 +1479,24 @@ class ModelManager:
     def choose_backend(self, requested: str, model_id: str) -> str:
         if requested == "cpu":
             return "cpu"
+
+        fault = cuda_fault_reason()
+        if fault:
+            if requested == "cuda":
+                raise RuntimeError(
+                    "La GPU quedó fuera de servicio en esta sesión "
+                    f"({fault}). Reinicia la app para volver a usarla, o "
+                    "genera en modo CPU."
+                )
+            return "cpu"
+
         info = torch_info()
         if requested == "cuda":
             if not info.get("cuda_available"):
                 raise RuntimeError("CUDA no está disponible en este equipo.")
             return "cuda"
 
-        model_info = SUPPORTED_MODELS.get(model_id) or {}
-        required = float(
-            model_info.get("gpu_vram_recommended_gb")
-            or VRAM_REQUIRED_GB.get(model_id, DEFAULT_VRAM_REQUIRED_GB)
-        )
+        required = vram_required_gb(model_id)
         available = float(info.get("vram_gb") or 0.0)
         if info.get("cuda_available") and available >= required:
             return "cuda"
@@ -1363,8 +1544,9 @@ class ModelManager:
             tune_cpu_threads()
 
             if target == "cuda":
-                dtype = torch.float16
+                dtype = resolve_cuda_dtype(torch)
                 device_map = "cuda:0"
+                print(f"[torch] GPU en {cuda_dtype_name()}")
             else:
                 dtype = torch.float32
                 device_map = "cpu"
@@ -1435,9 +1617,28 @@ class ModelManager:
                 return self._generate_once(
                     text, voice_path, ref_text, language, target, generation, model_id, request_id
                 )
+            except GenerationCancelled:
+                raise
             except Exception as first_error:
                 is_auto_cuda = requested_mode == "auto" and target == "cuda"
                 is_oom = "out of memory" in str(first_error).lower()
+
+                if target == "cuda" and is_cuda_fault(first_error):
+                    # El contexto CUDA ya no sirve para nada en este proceso
+                    # (ver disable_cuda), así que se descarta la GPU y se
+                    # termina el trabajo en CPU en vez de devolver un 500 que
+                    # se repetiría idéntico en cada reintento del usuario.
+                    disable_cuda(describe_cuda_fault(first_error))
+                    STATUS.set(
+                        "loading_model",
+                        "Cambiando a CPU",
+                        "La GPU falló durante la síntesis. Terminando en modo compatible.",
+                        "cpu",
+                    )
+                    self.unload()
+                    return self._generate_once(
+                        text, voice_path, ref_text, language, "cpu", generation, model_id, request_id
+                    )
 
                 if is_auto_cuda and is_oom:
                     STATUS.set(
@@ -1451,10 +1652,10 @@ class ModelManager:
                         text, voice_path, ref_text, language, "cpu", generation, model_id, request_id
                     )
 
-                # Any other failure may have left the model/CUDA context in a
-                # bad state (e.g. a CUDA fault mid-generation). Drop it so the
-                # next request starts from a clean reload instead of reusing
-                # a possibly-wedged model and failing the same way forever.
+                # Cualquier otro fallo pudo dejar el modelo a medias. Se
+                # descarta para que la petición siguiente parta de una carga
+                # limpia en vez de reutilizar un modelo dudoso y fallar igual
+                # para siempre.
                 self.unload()
                 raise
 
@@ -2218,16 +2419,19 @@ def generate(request: GenerateRequest):
         STATUS.set("idle", "Motor listo", "Generación cancelada por el usuario.", MODEL_MANAGER.backend)
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except Exception as exc:
+        # Se responde un resumen, así que el volcado completo solo sobrevive si
+        # se escribe aquí: HTTPException es un error "manejado" y uvicorn no lo
+        # registra. Sin esto, el registro del motor —lo que pide el botón
+        # Copiar diagnóstico— se quedaría sin la causa real.
+        print("[generate] fallo:\n" + traceback.format_exc(), file=sys.stderr)
+        detail = friendly_generation_error(exc)
         STATUS.set(
             "error",
             "Error del motor",
-            f"{type(exc).__name__}: {exc}",
+            detail,
             MODEL_MANAGER.backend,
         )
-        raise HTTPException(
-            status_code=500,
-            detail=f"{type(exc).__name__}: {exc}",
-        ) from exc
+        raise HTTPException(status_code=500, detail=detail) from exc
     finally:
         STATUS.end_request()
         MODEL_MANAGER.end_generation()
