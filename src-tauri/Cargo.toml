@@ -1,6 +1,6 @@
 [package]
 name = "qwen-voice-studio"
-version = "0.8.1"
+version = "0.8.2"
 description = "Desktop interface for local Qwen3-TTS voice cloning"
 authors = ["Qwen Voice Studio"]
 edition = "2021"
