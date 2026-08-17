@@ -24,24 +24,35 @@ Write-Host "Ejecutando pruebas del motor..."
 & ".\.venv\Scripts\python.exe" -m unittest discover -s tests -p "test_*.py"
 if ($LASTEXITCODE -ne 0) { throw "Las pruebas del motor fallaron." }
 
-# La versión del motor tiene que coincidir entre el frontend y el catálogo que
-# Rust descarga; si no, la app pide actualizar a una versión que no existe.
+# La URL del catálogo va compilada en el instalador. Si se fija a una Release
+# versionada, una app antigua queda viendo para siempre el motor con el que
+# salió y publicar una corrección nunca la alcanza. Tiene que ser el puntero
+# estable 'engine-latest'.
+$rust = Get-Content ".\src-tauri\src\lib.rs" -Raw
+$manifestUrl = [regex]::Match(
+    $rust,
+    'ENGINE_MANIFEST_URL:\s*&str\s*=\s*"([^"]+)"'
+).Groups[1].Value
+
+if (-not $manifestUrl) {
+    throw "No se pudo leer ENGINE_MANIFEST_URL de src-tauri\src\lib.rs."
+}
+if ($manifestUrl -match '/download/engine-v[0-9]') {
+    throw "ENGINE_MANIFEST_URL está fijado a una Release versionada ($manifestUrl). Usa 'engine-latest' o las apps antiguas no recibirán motores nuevos."
+}
+if ($manifestUrl -notmatch '/download/engine-latest/engine-manifest\.json$') {
+    throw "ENGINE_MANIFEST_URL no apunta al catálogo esperado: $manifestUrl"
+}
+Write-Host "Catálogo del motor sin fijar por versión: OK" -ForegroundColor Green
+
 $frontendEngine = [regex]::Match(
     (Get-Content ".\src\main.js" -Raw),
     'REQUIRED_ENGINE_VERSION\s*=\s*"([^"]+)"'
 ).Groups[1].Value
-$manifestEngine = [regex]::Match(
-    (Get-Content ".\src-tauri\src\lib.rs" -Raw),
-    'engine-v([0-9]+\.[0-9]+\.[0-9]+)/engine-manifest\.json'
-).Groups[1].Value
-
-if (-not $frontendEngine -or -not $manifestEngine) {
-    throw "No se pudo leer la versión del motor del frontend o del catálogo."
+if ($frontendEngine -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') {
+    throw "REQUIRED_ENGINE_VERSION no es una versión válida: '$frontendEngine'"
 }
-if ($frontendEngine -ne $manifestEngine) {
-    throw "REQUIRED_ENGINE_VERSION ($frontendEngine) no coincide con el catálogo publicado ($manifestEngine)."
-}
-Write-Host "Motor requerido y catálogo coinciden: $frontendEngine" -ForegroundColor Green
+Write-Host "Motor mínimo exigido: $frontendEngine" -ForegroundColor Green
 
 $dirty = git status --porcelain
 if ($dirty) {
