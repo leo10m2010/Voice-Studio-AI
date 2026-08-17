@@ -11,6 +11,7 @@ import sys
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from pathlib import Path
 from typing import Literal, Optional
 from datetime import datetime, timezone
@@ -115,6 +116,22 @@ MODEL_INSTALLER = ModelInstallRegistry(HF_HOME, SUPPORTED_MODELS)
 
 ALLOWED_AUDIO = {".wav", ".mp3", ".flac", ".ogg"}
 MAX_UPLOAD_MB = 80
+
+# Por encima de ~100 caracteres la velocidad de habla se va acelerando hacia el
+# final del fragmento (issue #239 del repo oficial de Qwen3-TTS). Fragmentar a
+# 460 dejaba casi cualquier locución dentro de esa zona. 200 mantiene un spot
+# típico en un solo fragmento y parte los textos largos antes de que derive.
+TTS_CHUNK_CHARS = 200
+
+# Cada entrada retiene los tensores del prompt de una voz. Con una biblioteca
+# grande no tiene sentido conservarlas todas.
+PROMPT_CACHE_MAX = 8
+
+# Cuánto puede tardar una generación antes de considerarla colgada. Medido a
+# ~1.3 s por carácter en el peor CPU probado; este margen es varias veces eso,
+# así que solo se dispara cuando de verdad dejó de progresar.
+STUCK_SECONDS_PER_CHAR = 8.0
+STUCK_MINIMUM_SECONDS = 600.0
 
 app = FastAPI(title="Qwen Voice Studio Local Engine", version="0.1.0")
 app.add_middleware(
@@ -951,7 +968,36 @@ def get_voice_reference_info(audio_path: Path) -> dict:
     }
 
 
-def split_text_for_tts(text: str, max_chars: int = 460) -> list[str]:
+_SPEAKABLE = re.compile(
+    r"[0-9A-Za-zÀ-ÿĀ-ſ"          # latino, con acentos y extendido
+    r"\s"
+    r".,;:!?¡¿'\"()\[\]{}«»…\-–—/%+&@#*°º ª$€£]"
+)
+
+
+def sanitize_script(text: str) -> tuple[str, list[str]]:
+    """
+    Deja solo caracteres que el modelo puede pronunciar en español.
+
+    generate_voice_clone() se cuelga indefinidamente con entradas de escritura
+    mezclada (issue #318 del repo oficial), y un emoji o un ideograma pegado
+    por accidente basta para provocarlo. Como retener el lock para siempre
+    inutiliza el motor entero, es mejor no llegar a esa llamada: se retiran
+    esos caracteres y se informa de cuáles eran.
+    """
+    kept = []
+    removed: list[str] = []
+    for char in text:
+        if _SPEAKABLE.match(char):
+            kept.append(char)
+        elif char.isspace():
+            kept.append(" ")
+        elif char not in removed:
+            removed.append(char)
+    return "".join(kept), removed
+
+
+def split_text_for_tts(text: str, max_chars: int = TTS_CHUNK_CHARS) -> list[str]:
     text = re.sub(r"\s+", " ", text.strip())
     if max_chars < 1:
         raise ValueError("max_chars debe ser mayor que cero.")
@@ -1078,7 +1124,41 @@ class ModelManager:
         self.model_id: Optional[str] = None
         self.load_lock = threading.Lock()
         self.generate_lock = threading.Lock()
-        self.prompt_cache: dict[str, object] = {}
+        # LRU acotada: cada entrada retiene tensores de una voz y antes solo se
+        # vaciaba al descargar el modelo, así que con una biblioteca grande la
+        # memoria crecía sin techo a lo largo de la sesión.
+        self.prompt_cache: OrderedDict[str, object] = OrderedDict()
+        # Instante en que empezó la generación en curso, para poder distinguir
+        # "va lenta" de "se colgó" (ver stuck_seconds).
+        self._active_since: Optional[float] = None
+        self._active_budget: float = 0.0
+        self._active_lock = threading.Lock()
+
+    def begin_generation(self, budget_seconds: float) -> None:
+        with self._active_lock:
+            self._active_since = time.monotonic()
+            self._active_budget = budget_seconds
+
+    def end_generation(self) -> None:
+        with self._active_lock:
+            self._active_since = None
+            self._active_budget = 0.0
+
+    def stuck_seconds(self) -> float:
+        """
+        Segundos que la generación en curso lleva pasada de su presupuesto.
+
+        generate_voice_clone() puede quedarse colgado con ciertas entradas
+        (issue #318 del repo oficial). Cuando eso pasa retiene generate_lock
+        para siempre: el motor sigue respondiendo /api/health pero ninguna
+        generación posterior vuelve a completarse nunca. No se puede abortar
+        esa llamada desde Python, pero sí detectarla y decirlo.
+        """
+        with self._active_lock:
+            if self._active_since is None or self._active_budget <= 0:
+                return 0.0
+            over = time.monotonic() - self._active_since - self._active_budget
+            return max(0.0, over)
 
     def unload(self) -> None:
         self.model = None
@@ -1196,6 +1276,7 @@ class ModelManager:
         key = f"{self.model_id}|{backend}|{voice_path.stem}|{signature}"
 
         if key in self.prompt_cache:
+            self.prompt_cache.move_to_end(key)
             return self.prompt_cache[key], prepared_path
 
         prompt = model.create_voice_clone_prompt(
@@ -1204,6 +1285,8 @@ class ModelManager:
             x_vector_only_mode=not bool(transcript),
         )
         self.prompt_cache[key] = prompt
+        while len(self.prompt_cache) > PROMPT_CACHE_MAX:
+            self.prompt_cache.popitem(last=False)
         return prompt, prepared_path
 
     def generate(
@@ -1430,6 +1513,7 @@ def health():
         "model": DEFAULT_MODEL_ID,
         "data_root": str(DATA_ROOT),
         "library_warming_up": WARM_UP.busy,
+        "generation_stuck_seconds": round(MODEL_MANAGER.stuck_seconds(), 1),
     }
 
 
@@ -1766,6 +1850,29 @@ def generate(request: GenerateRequest):
             detail="Esta versión limita cada guion a 3000 caracteres.",
         )
 
+    # Una generación colgada retiene generate_lock para siempre. Sin esto, la
+    # siguiente petición se quedaría esperando indefinidamente y el usuario
+    # vería otra vez "le doy generar y no pasa nada"; con esto recibe el motivo
+    # y la app puede ofrecer reiniciar el motor.
+    stuck = MODEL_MANAGER.stuck_seconds()
+    if stuck > 0:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "La generación anterior lleva "
+                f"{int(stuck / 60) + 1} min pasada de su tiempo previsto y dejó "
+                "el motor bloqueado. Reinicia Voice Studio AI para recuperarlo."
+            ),
+        )
+
+    text, removed = sanitize_script(text)
+    text = text.strip()
+    if not text:
+        raise HTTPException(
+            status_code=400,
+            detail="El guion no contiene texto que se pueda pronunciar.",
+        )
+
     if request.model_id not in SUPPORTED_MODELS:
         raise HTTPException(
             status_code=400,
@@ -1798,6 +1905,9 @@ def generate(request: GenerateRequest):
         ref_text = candidate or None
 
     STATUS.start_request()
+    MODEL_MANAGER.begin_generation(
+        max(STUCK_MINIMUM_SECONDS, len(text) * STUCK_SECONDS_PER_CHAR)
+    )
     STATUS.set(
         "checking",
         "Comprobando hardware",
@@ -1935,6 +2045,7 @@ def generate(request: GenerateRequest):
             "used_transcript": bool(ref_text),
             "history": history_item,
             "qwen_sampling": generation,
+            "removed_characters": removed,
         }
     except GenerationCancelled as exc:
         STATUS.set("idle", "Motor listo", "Generación cancelada por el usuario.", MODEL_MANAGER.backend)
@@ -1952,6 +2063,7 @@ def generate(request: GenerateRequest):
         ) from exc
     finally:
         STATUS.end_request()
+        MODEL_MANAGER.end_generation()
         if request.request_id:
             clear_generation_cancelled(request.request_id)
 

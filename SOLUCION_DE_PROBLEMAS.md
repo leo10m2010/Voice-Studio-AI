@@ -69,6 +69,25 @@ Copiar diagnóstico. Causas frecuentes, en orden:
 La descarga viene de Hugging Face. En una red corporativa suele estar
 bloqueada. El diagnóstico muestra `Modelo <id>: error` con el detalle.
 
+## "El motor quedó bloqueado"
+
+`generate_voice_clone()` de Qwen3-TTS puede colgarse indefinidamente con
+ciertas entradas ([issue #318](https://github.com/QwenLM/Qwen3-TTS/issues)).
+Cuando pasa, retiene el cerrojo de generación: el motor sigue respondiendo a
+las comprobaciones de salud —parece vivo— pero ninguna locución posterior se
+completa nunca.
+
+Esa llamada no se puede abortar desde fuera. Lo que sí hace la app:
+
+- **Evitarlo**: retira del guion los caracteres que el modelo no puede
+  pronunciar (emoji, escrituras no latinas), que son los que disparan el
+  cuelgue. Si se quitó algo, te lo dice tras generar.
+- **Detectarlo**: si una generación pasa varias veces del tiempo previsto, se
+  marca como bloqueada y la siguiente petición falla al instante con el motivo
+  en vez de esperar para siempre.
+- **Recuperarlo**: el botón **Reintentar** del aviso reemplaza el proceso del
+  motor. Es la única cura real; cerrar y abrir la app hace lo mismo.
+
 ## Avisos de versión
 
 Al abrir, la app consulta si hay una Release más reciente y muestra una franja

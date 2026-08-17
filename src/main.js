@@ -1224,6 +1224,9 @@ async function generate(){
     const result=await api("/api/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...settingsPayload(),request_id:requestId}),signal:state.generationController.signal});
     recordRenderTime(characters,(performance.now()-startedAt)/1000);
     updateRenderEstimate();
+    if(result.removed_characters?.length){
+      toast(`Se quitaron caracteres que no se pueden pronunciar: ${result.removed_characters.join(" ")}`,"error");
+    }
     const url=`${API}${result.url}`,name=result.filename;
     state.selectedSoundId="";
     await setResultAudio(url,name,state.voice.name,result.history);
@@ -1236,6 +1239,14 @@ async function generate(){
       el.strip.classList.add("visible");el.strip.classList.remove("success","error");
       el.stripTitle.textContent="Cancelado";el.stripText.textContent="Se canceló la generación.";
       hideStrip(1800);
+    }else if(/bloqueado/i.test(e.message)){
+      // Una generación anterior se colgó dentro del modelo y retiene el motor.
+      // No se puede abortar desde fuera, pero reiniciar el proceso sí lo cura.
+      el.strip.classList.add("visible","error");
+      el.stripTitle.textContent="El motor quedó bloqueado";
+      el.stripText.textContent=e.message;
+      showBootFailure(e.message);
+      toast(e.message,"error");
     }else{
       el.strip.classList.add("visible","error");el.stripTitle.textContent="No se pudo generar";el.stripText.textContent=e.message;toast(e.message,"error");hideStrip(4300);
     }
@@ -2011,7 +2022,20 @@ el.repairEngineButton.onclick=repairEngine;
 el.uninstallEngineButton.onclick=removeEngine;
 el.engineDiagnosticsButton.onclick=()=>copyDiagnostics(el.engineDiagnosticsButton);
 el.bootDiagnostics.onclick=()=>copyDiagnostics(el.bootDiagnostics);
-el.retryBoot.onclick=()=>{state.engine.bootStarted=false;launchWorkspace()};
+el.retryBoot.onclick=async()=>{
+  el.retryBoot.disabled=true;
+  try{
+    // Reemplaza el proceso: si el motor está colgado dentro del modelo, seguir
+    // hablándole no sirve de nada. En navegador no hay proceso que reiniciar.
+    if(isDesktop())await tauriInvoke("restart_engine");
+  }catch(error){
+    toast(String(error),"error");
+  }finally{
+    el.retryBoot.disabled=false;
+  }
+  state.engine.bootStarted=false;
+  launchWorkspace();
+};
 el.openUpdate.onclick=openAppUpdate;
 el.dismissUpdate.onclick=dismissAppUpdate;
 

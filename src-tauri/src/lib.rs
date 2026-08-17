@@ -1383,6 +1383,34 @@ fn terminate_engine(state: &EngineProcess, expected_stop: &EngineExpectedStop) -
     Ok(())
 }
 
+/// Kills the engine and starts a fresh one.
+///
+/// The recovery path for a wedged generation: generate_voice_clone() can hang
+/// on some inputs and holds the generation lock forever, so the engine keeps
+/// answering health checks while never completing another render. That call
+/// cannot be aborted from inside, so replacing the process is the only cure.
+#[tauri::command]
+fn restart_engine(
+    app: AppHandle,
+    state: State<EngineProcess>,
+    expected_stop: State<EngineExpectedStop>,
+) -> Result<String, String> {
+    terminate_engine(state.inner(), expected_stop.inner())?;
+
+    let child = spawn_engine(&app)?;
+    {
+        let mut guard = state
+            .0
+            .lock()
+            .map_err(|_| "No se pudo bloquear el estado.".to_string())?;
+        *guard = Some(child);
+    }
+
+    expected_stop.0.store(false, Ordering::Relaxed);
+    spawn_engine_watchdog(app.clone());
+    Ok("restarted".into())
+}
+
 #[tauri::command]
 fn uninstall_engine(
     _app: AppHandle,
@@ -1415,6 +1443,7 @@ pub fn run() {
             install_engine,
             cancel_engine_install,
             start_engine,
+            restart_engine,
             uninstall_engine,
             check_app_update,
             open_release_page

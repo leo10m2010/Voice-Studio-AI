@@ -495,3 +495,31 @@ v0.6.12:
 - el Release se verifica al final con `gh release view`.
 
 ---
+
+## Defensas ante defectos conocidos de Qwen3-TTS
+
+Contrastado contra los issues del repo oficial `QwenLM/Qwen3-TTS`.
+
+| Issue | Qué reporta | Nuestra situación |
+|---|---|---|
+| #350 | Inferencia concurrente no soportada | Ya serializado con `generate_lock` |
+| #333 | Logits NaN con flash attention | Usamos `attn_implementation="sdpa"` |
+| #318 | `generate_voice_clone()` se cuelga con escritura mezclada | `sanitize_script()` retira lo no pronunciable; `stuck_seconds()` lo detecta; `restart_engine` lo recupera |
+| #239 | La velocidad de habla se acelera pasados ~100 caracteres | `TTS_CHUNK_CHARS` bajado de 460 a 200 |
+| #328 | Cadenas de tiempo y cifras mal pronunciadas | `text_normalize.normalize_spanish()` |
+| #341 | ICL repite la cola del audio de referencia antes del texto | Sin arreglo limpio desde fuera; se mitiga con referencias recortadas de 8–25 s |
+
+### Por qué el cuelgue era grave
+
+Una llamada colgada retiene `generate_lock` para siempre. El motor seguía
+respondiendo `/api/health` —parecía sano— pero ninguna generación posterior
+volvía a completarse. No hay forma de abortar esa llamada desde Python, así
+que la defensa es en tres capas: no llegar a ella, detectarla cuando ocurre,
+y poder reemplazar el proceso sin cerrar la aplicación.
+
+### Fuga de memoria corregida (hallazgo propio, no de los issues)
+
+`prompt_cache` no tenía tope y solo se vaciaba al descargar el modelo. Cada
+entrada retiene los tensores del prompt de una voz, así que en una biblioteca
+grande la memoria crecía durante toda la sesión. Ahora es una `OrderedDict`
+acotada por `PROMPT_CACHE_MAX` con desalojo del menos usado.
