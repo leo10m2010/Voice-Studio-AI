@@ -103,7 +103,6 @@ class PromptCacheTest(unittest.TestCase):
         self.assertIn(f"voz-{server.PROMPT_CACHE_MAX + 2}", manager.prompt_cache)
 
 
-
 class FormatoDeSalidaTest(unittest.TestCase):
     """MP3 lo escribe libsndfile; no añade dependencias al instalador."""
 
@@ -264,6 +263,7 @@ class RemuestreoTest(unittest.TestCase):
         salida, _ = server.resample_output(self.mono, 24000, 44100)
         self.assertTrue(np.all(np.isfinite(salida)))
         self.assertLessEqual(float(np.max(np.abs(salida))), 1.05)
+
 
 if __name__ == "__main__":
     unittest.main()
