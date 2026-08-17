@@ -189,5 +189,81 @@ class LongitudDeReferenciaTest(unittest.TestCase):
         self.assertGreater(server.REFERENCE_MAX_SECONDS, 15.0)
         self.assertLess(server.REFERENCE_MAX_SECONDS, 25.0)
 
+
+class TramoDeReferenciaTest(unittest.TestCase):
+    """Elegir desde qué segundo se toma la referencia."""
+
+    def _voz(self, segundos, sr=24000):
+        import numpy as np
+        n = int(segundos * sr)
+        y = (0.3 * np.sin(2 * np.pi * 180 * np.arange(n) / sr)).astype("float32")
+        for k in range(1, int(segundos)):
+            y[int((k - 0.12) * sr):int(k * sr)] = 0.0
+        return y
+
+    def test_sin_desplazamiento_se_toma_el_principio(self):
+        y = self._voz(40)
+        salida = server.limit_reference_length(y, 24000, 0.0)
+        import numpy as np
+        self.assertTrue(np.array_equal(salida, y[:len(salida)]))
+
+    def test_con_desplazamiento_se_descarta_el_principio(self):
+        import numpy as np
+        y = self._voz(40)
+        salida = server.limit_reference_length(y, 24000, 10.0)
+        self.assertFalse(np.array_equal(salida, y[:len(salida)]))
+        self.assertLessEqual(len(salida) / 24000, server.REFERENCE_MAX_SECONDS + 0.01)
+
+    def test_un_desplazamiento_excesivo_se_ignora(self):
+        # Pedir un tramo que dejaría menos material del mínimo no debe
+        # producir una referencia inservible: se mantiene el comportamiento
+        # normal en vez de devolver medio segundo de audio.
+        salida = server.limit_reference_length(self._voz(20), 24000, 19.0)
+        self.assertGreaterEqual(len(salida) / 24000, server.REFERENCE_MIN_KEEP_SECONDS)
+
+    def test_desplazamiento_negativo_no_rompe(self):
+        salida = server.limit_reference_length(self._voz(20), 24000, -5.0)
+        self.assertGreater(len(salida), 0)
+
+
+class RemuestreoTest(unittest.TestCase):
+    """El modelo entrega 24 kHz; las emisoras suelen pedir 44.1 kHz."""
+
+    def setUp(self):
+        import numpy as np
+        self.mono = (0.3 * np.sin(2 * np.pi * 440 * np.arange(24000) / 24000)).astype("float32")
+
+    def test_sin_objetivo_no_toca_nada(self):
+        import numpy as np
+        salida, sr = server.resample_output(self.mono, 24000, 0)
+        self.assertEqual(sr, 24000)
+        self.assertTrue(np.array_equal(salida, self.mono))
+
+    def test_misma_frecuencia_no_toca_nada(self):
+        import numpy as np
+        salida, sr = server.resample_output(self.mono, 24000, 24000)
+        self.assertEqual(sr, 24000)
+        self.assertTrue(np.array_equal(salida, self.mono))
+
+    def test_sube_a_44100_conservando_la_duracion(self):
+        salida, sr = server.resample_output(self.mono, 24000, 44100)
+        self.assertEqual(sr, 44100)
+        self.assertAlmostEqual(len(salida) / sr, len(self.mono) / 24000, delta=0.01)
+
+    def test_conserva_los_canales_de_una_mezcla_estereo(self):
+        import numpy as np
+        estereo = np.stack([self.mono, self.mono * 0.5], axis=1)
+        salida, sr = server.resample_output(estereo, 24000, 44100)
+        self.assertEqual(sr, 44100)
+        self.assertEqual(salida.ndim, 2)
+        self.assertEqual(salida.shape[1], 2)
+        self.assertAlmostEqual(salida.shape[0] / sr, estereo.shape[0] / 24000, delta=0.01)
+
+    def test_no_introduce_valores_invalidos(self):
+        import numpy as np
+        salida, _ = server.resample_output(self.mono, 24000, 44100)
+        self.assertTrue(np.all(np.isfinite(salida)))
+        self.assertLessEqual(float(np.max(np.abs(salida))), 1.05)
+
 if __name__ == "__main__":
     unittest.main()

@@ -57,6 +57,8 @@ const state = {
   generationController: null,
   generationEstimate: null,
   appUpdate: null,
+  queue: [],
+  queueRunning: false,
   engine: {
     status: null,
     catalog: null,
@@ -135,11 +137,25 @@ document.querySelector("#app").innerHTML = `
               <button class="pressable" data-prompt="¿Estás listo? Porque lo que viene ahora cambia por completo la forma de escuchar esta historia.">Expresivo</button>
             </div>
 
+            <div class="spoken-preview" id="spokenPreview" hidden>
+              <span class="spoken-eyebrow">ASÍ SE LEERÁ</span>
+              <p id="spokenText"></p>
+            </div>
+
             <div class="script-guidance">
               <span>${icons.info}</span>
               <p><strong>Español:</strong> escribe como quieres que suene. Puntos para pausas claras, comas para pausas cortas y exclamaciones con moderación.</p>
             </div>
           </div>
+        </div>
+
+        <div class="queue-panel" id="queuePanel" hidden>
+          <div class="queue-head">
+            <strong>En cola</strong>
+            <span class="queue-badge" id="queueCount">0</span>
+            <button class="secondary-button pressable" id="clearQueue" type="button">Vaciar</button>
+          </div>
+          <div class="queue-list" id="queueList"></div>
         </div>
 
         <div class="generation-strip" id="generationStrip" aria-live="polite">
@@ -174,6 +190,8 @@ document.querySelector("#app").innerHTML = `
               <span id="generateText">Generar</span>
               <kbd>Ctrl ↵</kbd>
             </button>
+
+            <button class="queue-add pressable" id="queueAdd" type="button" title="Añadir a la cola y limpiar el editor">${icons.plus}</button>
 
             <div class="audio-player" id="audioPlayer">
               <button class="player-play pressable" id="playerPlay" aria-label="Reproducir">${icons.play}</button>
@@ -237,6 +255,12 @@ document.querySelector("#app").innerHTML = `
                 </span>
                 <span class="chevron">${icons.chevron}</span>
               </button>
+            </div>
+
+            <div class="reference-trim" id="referenceTrim" hidden>
+              <div class="slider-title"><label>Tramo usado</label><output id="trimValue">desde 0 s</output></div>
+              <input id="referenceTrimRange" type="range" min="0" max="0" step="0.5" value="0">
+              <p class="setting-note" id="trimNote"></p>
             </div>
 
             <div class="reference-card" id="referenceCard">
@@ -324,6 +348,17 @@ document.querySelector("#app").innerHTML = `
               <div class="slider-hints"><span>Más grave</span><span>Más brillante</span></div>
               <input id="pitch" type="range" min="-3" max="3" step="0.25" value="0">
               <p class="setting-note">Postproceso local. Para máxima fidelidad, déjalo en 0.</p>
+            </div>
+
+            <div class="setting-block compact-top">
+              <label>Frecuencia</label>
+              <div class="select-native">
+                <select id="outputRate">
+                  <option value="0">24 kHz · nativa del modelo</option>
+                  <option value="44100">44.1 kHz · estándar de emisoras</option>
+                </select>
+                ${icons.chevron}
+              </div>
             </div>
 
             <div class="setting-block compact-top">
@@ -575,7 +610,7 @@ const $$ = q => [...document.querySelectorAll(q)];
 
 const el = {
   script: $("#scriptInput"), count: $("#characterCount"), duration: $("#durationEstimate"), icl: $("#iclStatus"),
-  renderEstimate: $("#renderEstimate"), generationProgress: $("#generationProgress"), generationBar: $("#generationBar"), generationClock: $("#generationClock"),
+  renderEstimate: $("#renderEstimate"), queuePanel: $("#queuePanel"), queueList: $("#queueList"), queueCount: $("#queueCount"), queueAdd: $("#queueAdd"), clearQueue: $("#clearQueue"), spokenPreview: $("#spokenPreview"), spokenText: $("#spokenText"), outputRate: $("#outputRate"), generationProgress: $("#generationProgress"), generationBar: $("#generationBar"), generationClock: $("#generationClock"),
   strip: $("#generationStrip"), stripTitle: $("#generationTitle"), stripText: $("#generationText"), stripEngine: $("#generationEngine"), orb: $("#thinkingOrb"), cancelGeneration: $("#cancelGeneration"),
   generate: $("#generateButton"), generateIcon: $("#generateIcon"), generateText: $("#generateText"), transport: $("#transport"),
   audio: $("#resultAudio"), player: $("#audioPlayer"), playerPlay: $("#playerPlay"), playerCurrent: $("#playerCurrent"),
@@ -583,6 +618,7 @@ const el = {
   musicButton: $("#musicButton"), musicPopover: $("#musicPopover"), applyMusic: $("#applyMusic"), removeMusic: $("#removeMusic"),
   playerVolume: $("#playerVolume"), download: $("#downloadButton"), bottomVoice: $("#bottomVoice"), bottomMode: $("#bottomMode"),
   hardware: $("#hardwareText"), voiceSelector: $("#voiceSelector"), selectedVoiceName: $("#selectedVoiceName"), selectedVoiceMeta: $("#selectedVoiceMeta"),
+  referenceTrim: $("#referenceTrim"), referenceTrimRange: $("#referenceTrimRange"), trimValue: $("#trimValue"), trimNote: $("#trimNote"),
   referenceScore: $("#referenceScore"), referenceLabel: $("#referenceLabel"), referenceDetails: $("#referenceDetails"), improveClone: $("#improveClone"),
   modelSelector: $("#modelSelector"), selectedModelAvatar: $("#selectedModelAvatar"), selectedModelName: $("#selectedModelName"), selectedModelMeta: $("#selectedModelMeta"),
   modelInstallCard: $("#modelInstallCard"), modelInstallTitle: $("#modelInstallTitle"), modelInstallMeta: $("#modelInstallMeta"), installSelectedModel: $("#installSelectedModel"),
@@ -860,16 +896,59 @@ function updateReference(){
   const dur=v.duration?`${Number(v.duration).toFixed(1)} s`:"duración desconocida";
   el.referenceDetails.textContent=`${dur} · ${v.has_transcript?"ICL":"X-vector"} · ${v.prepared?"24 kHz mono preparado":"original"}`;
 }
+// El recorte automático se queda con el principio del audio, que no siempre
+// es el mejor tramo. Solo tiene sentido ofrecer esto cuando sobra material.
+const TRIM_WINDOW_SECONDS=18;
+function updateReferenceTrim(){
+  const v=state.voice;
+  const total=Number(v?.source_duration||0);
+  if(!v||!total||total<=TRIM_WINDOW_SECONDS+1){
+    el.referenceTrim.hidden=true;
+    return;
+  }
+  el.referenceTrim.hidden=false;
+  const max=Math.max(0,Math.floor((total-TRIM_WINDOW_SECONDS)*2)/2);
+  el.referenceTrimRange.max=String(max);
+  el.referenceTrimRange.value=String(Math.min(Number(v.offset_seconds||0),max));
+  renderTrimLabels(total);
+}
+function renderTrimLabels(total){
+  const start=Number(el.referenceTrimRange.value)||0;
+  const end=Math.min(total,start+TRIM_WINDOW_SECONDS);
+  el.trimValue.textContent=`desde ${start.toFixed(1)} s`;
+  el.trimNote.textContent=`Se usarán ${start.toFixed(1)}–${end.toFixed(1)} s de ${total.toFixed(1)} s. El resto se descarta.`;
+}
+async function applyReferenceTrim(){
+  const v=state.voice;
+  if(!v)return;
+  const offset=Number(el.referenceTrimRange.value)||0;
+  el.referenceTrimRange.disabled=true;
+  try{
+    const result=await api(`/api/voices/${encodeURIComponent(v.id)}/offset`,{
+      method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({offset_seconds:offset}),
+      signal:AbortSignal.timeout(120000)
+    });
+    await refreshData();
+    state.voice=state.voices.find(x=>x.id===v.id)||state.voice;
+    updateVoiceUI();
+    toast(`Tramo aplicado · ${result.quality_label} (${result.quality_score}/100)`,"success");
+  }catch(e){
+    toast(e.message,"error");
+  }finally{
+    el.referenceTrimRange.disabled=false;
+  }
+}
 function updateVoiceUI(){
   if(!state.voice){
     el.selectedVoiceName.textContent="Selecciona una voz";el.selectedVoiceMeta.textContent="Mis voces";
-    el.bottomVoice.textContent="Sin voz seleccionada";el.icl.textContent="Selecciona una voz";updateReference();return updateGenerate()
+    el.bottomVoice.textContent="Sin voz seleccionada";el.icl.textContent="Selecciona una voz";updateReference();updateReferenceTrim();return updateGenerate()
   }
   el.selectedVoiceName.textContent=state.voice.name;
   el.selectedVoiceMeta.textContent=state.voice.has_transcript?"ICL · audio + transcripción":"X-vector · sin transcripción";
   el.bottomVoice.textContent=state.voice.name;
   el.icl.textContent=state.voice.has_transcript?"ICL activo · mayor fidelidad":"Solo X-vector · menor fidelidad";
-  updateReference();updateGenerate();
+  updateReference();updateReferenceTrim();updateGenerate();
 }
 function renderVoices(filter=""){
   const q=filter.toLowerCase().trim();
@@ -950,11 +1029,46 @@ function renderHistory(){
       <span class="history-play">${icons.play}</span>
       <span class="history-copy"><strong>${esc(h.title)}</strong><small>${esc(h.voice_name)} · ${esc(h.model_name||"Qwen")}${h.music_name?` · ♪ ${esc(h.music_name)}`:""} · ${prettyDate(h.created_at)}</small></span>
       <span class="history-format">${esc((h.filename||"wav").split(".").pop().toUpperCase())}</span>
+      <span class="history-reuse" data-reuse="${esc(h.id)}" title="Reutilizar guion y ajustes">${icons.refresh}</span>
     </button>`).join(""):`<div class="empty-list"><strong>Aún no hay historial</strong><span>Las locuciones aparecerán aquí.</span></div>`;
-  $$("[data-history-id]").forEach(b=>b.onclick=()=>{
+  $$("[data-history-id]").forEach(b=>b.onclick=e=>{
     const item=state.history.find(h=>h.id===b.dataset.historyId);
-    if(item)setResultAudio(`${API}${item.url}`,item.filename,item.voice_name,item);
+    if(!item)return;
+    if(e.target.closest("[data-reuse]"))return reuseHistoryItem(item);
+    setResultAudio(`${API}${item.url}`,item.filename,item.voice_name,item);
   });
+}
+
+// Recupera guion, voz y ajustes de una locución anterior. Con minutos por
+// generación, rehacer una variación a mano es tiempo tirado.
+function reuseHistoryItem(item){
+  const s=item.settings||{};
+  el.script.value=item.text||"";
+  el.script.dispatchEvent(new Event("input"));
+
+  const voice=state.voices.find(v=>v.id===item.voice_id);
+  if(voice){state.voice=voice;updateVoiceUI();renderVoices(el.voiceSearch.value)}
+
+  const model=state.models.compatible?.find(m=>m.id===(s.model_id||item.model_id));
+  if(model){state.model=model;updateModelUI()}
+
+  if(s.speed!=null)el.speed.value=s.speed;
+  if(s.stability!=null)el.stability.value=Math.round(Number(s.stability)*100);
+  if(s.style_exaggeration!=null)el.style.value=Math.round(Number(s.style_exaggeration)*100);
+  if(s.pitch_semitones!=null)el.pitch.value=s.pitch_semitones;
+  if(s.output_format)el.output.value=s.output_format;
+  if(s.speaker_boost!=null){
+    el.speakerBoost.classList.toggle("on",Boolean(s.speaker_boost));
+    el.speakerBoost.setAttribute("aria-pressed",String(Boolean(s.speaker_boost)));
+  }
+  if(s.profile){
+    state.profile=s.profile;
+    $$("#profileButtons button").forEach(b=>b.classList.toggle("active",b.dataset.profile===s.profile));
+  }
+
+  syncLabels();savePreferences();updateGenerate();
+  switchTab("settings");
+  toast(`Ajustes recuperados${voice?` · voz ${voice.name}`:""}. Edita y vuelve a generar.`,"success");
 }
 
 function triggerFor(kind){
@@ -1060,9 +1174,8 @@ function recordRenderTime(chars,seconds){
   const blended=previous?previous*0.7+measured*0.3:measured;
   try{localStorage.setItem(CALIBRATION_KEY,String(blended))}catch{}
 }
-function estimateRenderSeconds(){
+function estimateRenderSeconds(chars=el.script.value.trim().length){
   const perChar=renderSecondsPerChar();
-  const chars=el.script.value.trim().length;
   return perChar&&chars?Math.round(perChar*chars):null;
 }
 function fmtDuration(seconds){
@@ -1070,6 +1183,31 @@ function fmtDuration(seconds){
   if(seconds<60)return `${Math.round(seconds)} s`;
   const m=Math.floor(seconds/60),s=Math.round(seconds%60);
   return s?`${m} min ${s} s`:`${m} min`;
+}
+// Muestra cómo se leerá el guion antes de gastar minutos generándolo. Solo
+// aparece cuando la lectura difiere de lo escrito: si no cambia nada, un panel
+// repitiendo el mismo texto sería ruido.
+let spokenPreviewTimer=null;
+let spokenPreviewToken=0;
+function scheduleSpokenPreview(){
+  clearTimeout(spokenPreviewTimer);
+  const text=el.script.value.trim();
+  if(!text){el.spokenPreview.hidden=true;return}
+  spokenPreviewTimer=setTimeout(async()=>{
+    const token=++spokenPreviewToken;
+    try{
+      const data=await api("/api/normalize",{
+        method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({text})
+      });
+      // Una respuesta vieja no debe pisar a una más nueva.
+      if(token!==spokenPreviewToken)return;
+      el.spokenPreview.hidden=!data.changed;
+      if(data.changed)el.spokenText.textContent=data.spoken;
+    }catch{
+      el.spokenPreview.hidden=true;
+    }
+  },600);
 }
 function updateRenderEstimate(){
   const seconds=estimateRenderSeconds();
@@ -1111,7 +1249,7 @@ function savePreferences(){
   try{
     localStorage.setItem("vsa-settings",JSON.stringify({
       model_id:selectedModel()?.id||DEFAULT_MODEL_ID,profile:state.profile,speed:el.speed.value,stability:el.stability.value,style:el.style.value,
-      pitch:el.pitch.value,output:el.output.value,mode:el.mode.value,musicVolume:el.musicVolume.value,boost:el.speakerBoost.classList.contains("on")
+      pitch:el.pitch.value,output:el.output.value,rate:el.outputRate.value,mode:el.mode.value,musicVolume:el.musicVolume.value,boost:el.speakerBoost.classList.contains("on")
     }));
   }catch{
     // Storage may be unavailable in restricted WebViews; navigation must still work.
@@ -1122,7 +1260,7 @@ function loadPreferences(){
     const p=JSON.parse(localStorage.getItem("vsa-settings")||"{}");state.profile=p.profile||"natural";
     const base=PROFILE_VALUES[state.profile]||PROFILE_VALUES.natural;
     el.speed.value=p.speed??base.speed;el.stability.value=p.stability??base.stability;el.style.value=p.style??base.style;el.pitch.value=p.pitch??base.pitch;
-    el.output.value=p.output||"wav";el.mode.value=p.mode||"auto";el.musicVolume.value=p.musicVolume||18;state.selectedSoundId="";
+    el.output.value=p.output||"wav";el.outputRate.value=p.rate||"0";el.mode.value=p.mode||"auto";el.musicVolume.value=p.musicVolume||18;state.selectedSoundId="";
     el.speakerBoost.classList.toggle("on",p.boost??base.boost);el.speakerBoost.setAttribute("aria-pressed",String(p.boost??base.boost));
     $$("#profileButtons button").forEach(b=>b.classList.toggle("active",b.dataset.profile===state.profile));
     const candidate=state.models.compatible.find(m=>m.id===(p.model_id||DEFAULT_MODEL_ID));
@@ -1136,7 +1274,7 @@ function settingsPayload(){
   return {
     text:el.script.value.trim(),voice_id:state.voice.id,model_id:selectedModel().id,language:"Spanish",mode:el.mode.value,profile:state.profile,
     speed:Number(el.speed.value),stability:Number(el.stability.value)/100,style_exaggeration:Number(el.style.value)/100,
-    pitch_semitones:Number(el.pitch.value),speaker_boost:el.speakerBoost.classList.contains("on"),output_format:el.output.value
+    pitch_semitones:Number(el.pitch.value),speaker_boost:el.speakerBoost.classList.contains("on"),output_format:el.output.value,output_sample_rate:Number(el.outputRate.value)||0
   }
 }
 
@@ -1208,24 +1346,29 @@ function pollStatus(){
   },650);
 }
 
-async function generate(){
-  const blocked=generationBlocker();
-  if(blocked){
-    toast(blocked.message,"error");
-    if(blocked.action==="voice")openSheet("voice");
-    if(blocked.action==="model")switchTab("settings");
-    if(blocked.action==="engine")showEngineManager();
-    return;
+async function generate(job=null){
+  if(!job){
+    const blocked=generationBlocker();
+    if(blocked){
+      toast(blocked.message,"error");
+      if(blocked.action==="voice")openSheet("voice");
+      if(blocked.action==="model")switchTab("settings");
+      if(blocked.action==="engine")showEngineManager();
+      return;
+    }
   }
-  const characters=el.script.value.trim().length;
+  // Un trabajo en cola lleva su propia copia de guion y ajustes: si el usuario
+  // sigue editando mientras se procesa, lo encolado no debe cambiar.
+  const payload=job?job.payload:settingsPayload();
+  const characters=(payload.text||"").trim().length;
   const startedAt=performance.now();
-  state.generationEstimate=estimateRenderSeconds();
+  state.generationEstimate=estimateRenderSeconds(characters);
   stopPreview();setBusy(true);pollStatus();
   const requestId=crypto.randomUUID();
   state.generationRequestId=requestId;
   state.generationController=new AbortController();
   try{
-    const result=await api("/api/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...settingsPayload(),request_id:requestId}),signal:state.generationController.signal});
+    const result=await api("/api/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...payload,request_id:requestId}),signal:state.generationController.signal});
     recordRenderTime(characters,(performance.now()-startedAt)/1000);
     updateRenderEstimate();
     if(result.removed_characters?.length){
@@ -1233,7 +1376,7 @@ async function generate(){
     }
     const url=`${API}${result.url}`,name=result.filename;
     state.selectedSoundId="";
-    await setResultAudio(url,name,state.voice.name,result.history);
+    await setResultAudio(url,name,result.history?.voice_name||state.voice?.name,result.history);
     el.strip.classList.add("success");
     el.stripTitle.textContent="Locución lista";
     el.stripText.textContent=`${result.model_name} · ${result.backend.toUpperCase()} · ${result.used_transcript?"ICL":"X-vector"}`;
@@ -1259,6 +1402,57 @@ async function generate(){
     state.generationController=null;state.generationRequestId=null;
     state.generationEstimate=null;
     el.generationProgress.hidden=true;
+    processQueue();
+  }
+}
+// Cola: con minutos por locución, encadenar varios spots sin quedarse
+// esperando cada uno es la diferencia entre trabajar y vigilar una barra.
+function queueCurrentScript(){
+  const blocked=generationBlocker();
+  if(blocked){
+    toast(blocked.message,"error");
+    if(blocked.action==="voice")openSheet("voice");
+    return;
+  }
+  const payload=settingsPayload();
+  state.queue.push({
+    id:crypto.randomUUID(),
+    payload,
+    title:payload.text.slice(0,60)+(payload.text.length>60?"…":""),
+    voiceName:state.voice?.name||""
+  });
+  renderQueue();
+  toast(`Añadido a la cola (${state.queue.length} en espera).`,"success");
+  el.script.value="";
+  el.script.dispatchEvent(new Event("input"));
+  processQueue();
+}
+function removeFromQueue(id){
+  state.queue=state.queue.filter(job=>job.id!==id);
+  renderQueue();
+}
+function renderQueue(){
+  const total=state.queue.length;
+  el.queuePanel.hidden=total===0;
+  el.queueCount.textContent=String(total);
+  el.queueList.innerHTML=state.queue.map((job,i)=>`
+    <div class="queue-row">
+      <span class="queue-index">${i+1}</span>
+      <span class="queue-copy"><strong>${esc(job.title)}</strong><small>${esc(job.voiceName)}</small></span>
+      <button class="icon-button small pressable" data-queue-remove="${esc(job.id)}" aria-label="Quitar de la cola">${icons.close}</button>
+    </div>`).join("");
+}
+async function processQueue(){
+  if(state.queueRunning||state.busy||!state.queue.length)return;
+  state.queueRunning=true;
+  try{
+    while(state.queue.length){
+      const job=state.queue.shift();
+      renderQueue();
+      await generate(job);
+    }
+  }finally{
+    state.queueRunning=false;
   }
 }
 function cancelGeneration(){
@@ -1879,7 +2073,7 @@ async function waitEngine({timeoutMs=90000}={}){
   return false;
 }
 
-el.script.oninput=()=>{el.count.textContent=`${el.script.value.length} / 3000`;estimateDuration();updateRenderEstimate();updateGenerate()};
+el.script.oninput=()=>{el.count.textContent=`${el.script.value.length} / 3000`;estimateDuration();updateRenderEstimate();scheduleSpokenPreview();updateGenerate()};
 el.voiceSelector.onclick=e=>{
   e.preventDefault();
   e.stopPropagation();
@@ -1951,6 +2145,8 @@ el.installSelectedModel.onclick=()=>{
 el.voiceSearch.oninput=()=>renderVoices(el.voiceSearch.value);
 el.addVoice.onclick=()=>el.voiceFile.click();el.voiceFile.onchange=()=>{const f=el.voiceFile.files?.[0];if(f)prepareImport(f);el.voiceFile.value=""};
 el.voiceImportForm.onsubmit=async e=>{if(e.submitter?.value==="cancel")return;e.preventDefault();if(!state.pendingVoiceFile)return;el.confirmVoiceImport.disabled=true;try{await importVoice(state.pendingVoiceFile,el.importTranscript.value.trim());el.voiceImportDialog.close();state.pendingVoiceFile=null;toast("Voz importada y preparada.","success")}catch(err){toast(err.message,"error")}finally{el.confirmVoiceImport.disabled=false}};
+el.referenceTrimRange.oninput=()=>renderTrimLabels(Number(state.voice?.source_duration||0));
+el.referenceTrimRange.onchange=applyReferenceTrim;
 el.improveClone.onclick=openTranscript;el.transcriptForm.onsubmit=async e=>{if(e.submitter?.value==="cancel")return;e.preventDefault();try{await saveTranscript(el.transcriptInput.value.trim());el.transcriptDialog.close();toast("Transcripción guardada.","success")}catch(err){toast(err.message,"error")}};
 el.removeTranscript.onclick=async()=>{try{await saveTranscript("");el.transcriptDialog.close();toast("Transcripción eliminada.")}catch(e){toast(e.message,"error")}};
 el.addSound.onclick=()=>el.soundFile.click();
@@ -1985,10 +2181,16 @@ el.previewSound.onclick=()=>{
   if(id)preview(`${API}/api/sounds/${encodeURIComponent(id)}/audio`,el.previewSound);
 };
 $$(".tabs button").forEach(b=>b.onclick=()=>switchTab(b.dataset.tab));el.historySearch.oninput=renderHistory;el.clearHistory.onclick=async()=>{await api("/api/history",{method:"DELETE"});state.history=[];renderHistory();toast("Historial borrado.")};
-el.generate.onclick=generate;el.cancelGeneration.onclick=cancelGeneration;$$("#profileButtons button").forEach(b=>b.onclick=()=>applyProfile(b.dataset.profile));
+el.generate.onclick=()=>generate();
+el.queueAdd.onclick=queueCurrentScript;
+el.clearQueue.onclick=()=>{state.queue=[];renderQueue();toast("Cola vaciada.")};
+el.queueList.onclick=e=>{
+  const b=e.target.closest("[data-queue-remove]");
+  if(b)removeFromQueue(b.dataset.queueRemove);
+};el.cancelGeneration.onclick=cancelGeneration;$$("#profileButtons button").forEach(b=>b.onclick=()=>applyProfile(b.dataset.profile));
 [el.speed,el.pitch].forEach(x=>x.oninput=()=>{syncLabels();state.profile="custom";$$("#profileButtons button").forEach(b=>b.classList.remove("active"));savePreferences()});
 [el.stability,el.style].forEach(x=>x.oninput=()=>{state.profile="custom";$$("#profileButtons button").forEach(b=>b.classList.remove("active"));savePreferences()});
-[el.output,el.mode].forEach(x=>x.onchange=savePreferences);
+[el.output,el.outputRate,el.mode].forEach(x=>x.onchange=savePreferences);
 el.soundSelect.onchange=()=>{
   stopPreview();
   state.selectedSoundId=el.soundSelect.value||"";

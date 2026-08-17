@@ -856,7 +856,30 @@ def analyze_reference_audio(audio_path: Path, transcript: str = "") -> dict:
         }
 
 
-def limit_reference_length(y, sample_rate: int):
+def reference_offset_path(audio_path: Path) -> Path:
+    return VOICE_META_DIR / f"{audio_path.stem}.offset"
+
+
+def read_reference_offset(audio_path: Path) -> float:
+    """Segundo desde el que empieza el tramo elegido por el usuario."""
+    ruta = reference_offset_path(audio_path)
+    if not ruta.exists():
+        return 0.0
+    try:
+        return max(0.0, float(ruta.read_text(encoding="utf-8").strip()))
+    except (OSError, ValueError):
+        return 0.0
+
+
+def write_reference_offset(audio_path: Path, seconds: float) -> None:
+    ruta = reference_offset_path(audio_path)
+    if seconds and seconds > 0:
+        ruta.write_text(f"{float(seconds):.3f}", encoding="utf-8")
+    else:
+        ruta.unlink(missing_ok=True)
+
+
+def limit_reference_length(y, sample_rate: int, offset_seconds: float = 0.0):
     """
     Acorta una referencia demasiado larga cortando en un silencio.
 
@@ -868,6 +891,11 @@ def limit_reference_length(y, sample_rate: int):
     """
     import librosa
     import numpy as np
+
+    # Tramo elegido a mano: se descarta lo anterior y se recorta desde ahí.
+    inicio = int(max(0.0, offset_seconds) * sample_rate)
+    if inicio and inicio < y.size - int(REFERENCE_MIN_KEEP_SECONDS * sample_rate):
+        y = np.ascontiguousarray(y[inicio:])
 
     limite = int(REFERENCE_MAX_SECONDS * sample_rate)
     if y.size <= limite:
@@ -926,7 +954,7 @@ def prepare_reference_audio(audio_path: Path, force: bool = False) -> tuple[Path
     if not y.size:
         y = np.zeros(2400, dtype=np.float32)
 
-    y = limit_reference_length(y, 24000)
+    y = limit_reference_length(y, 24000, read_reference_offset(audio_path))
 
     y = y - float(np.mean(y))
     rms = float(np.sqrt(np.mean(np.square(y)) + 1e-12))
@@ -1120,6 +1148,38 @@ AUDIO_MEDIA_TYPES = {
 # engorda el instalador. Es el formato que piden las emisoras y el que cabe en
 # WhatsApp: un spot de 10 s pasa de ~470 KB en WAV a ~40 KB.
 _SOUNDFILE_FORMATS = {"wav": "WAV", "flac": "FLAC", "mp3": "MP3"}
+
+
+def resample_output(samples, sample_rate: int, target_rate: int):
+    """
+    Lleva el resultado a otra frecuencia de muestreo.
+
+    El modelo entrega 24 kHz, pero las emisoras suelen pedir 44.1 kHz. Subir
+    la frecuencia no añade información; solo evita que el archivo se rechace
+    o lo reconvierta un equipo peor.
+    """
+    if not target_rate or target_rate == sample_rate:
+        return samples, sample_rate
+
+    import librosa
+    import numpy as np
+
+    audio = np.asarray(samples, dtype=np.float32)
+    if audio.ndim == 1:
+        convertido = librosa.resample(audio, orig_sr=sample_rate, target_sr=target_rate)
+    else:
+        canales = [
+            librosa.resample(
+                np.ascontiguousarray(audio[:, canal]),
+                orig_sr=sample_rate,
+                target_sr=target_rate,
+            )
+            for canal in range(audio.shape[1])
+        ]
+        minimo = min(len(canal) for canal in canales)
+        convertido = np.stack([canal[:minimo] for canal in canales], axis=1)
+
+    return convertido.astype(np.float32), target_rate
 
 
 def write_audio(path: Path, samples, sample_rate: int, extension: str) -> None:
@@ -1506,9 +1566,14 @@ class GenerateRequest(BaseModel):
     pitch_semitones: float = 0.0
     speaker_boost: bool = True
     output_format: Literal["wav", "flac", "mp3"] = "wav"
+    output_sample_rate: Literal[0, 44100] = 0
     music_id: Optional[str] = None
     music_volume: float = 0.18
     request_id: str = ""
+
+
+class NormalizeRequest(BaseModel):
+    text: str = ""
 
 
 class CancelGenerateRequest(BaseModel):
@@ -1567,6 +1632,8 @@ def list_audio(directory: Path, include_transcript: bool = False) -> list[dict]:
             item["rms_dbfs"] = prepared.get("rms_dbfs")
             item["prepared"] = bool(ref_info.get("prepared"))
             item["analyzing"] = bool(ref_info.get("analyzing"))
+            item["offset_seconds"] = read_reference_offset(path)
+            item["source_duration"] = (ref_info.get("original") or {}).get("duration")
         items.append(item)
     return items
 
@@ -1694,6 +1761,33 @@ def update_voice_transcript(voice_id: str, request: TranscriptUpdate):
         "voice_id": voice_id,
         "has_transcript": bool(text),
         "transcript": text,
+        "quality_score": metadata.get("quality_score", 0),
+        "quality_label": metadata.get("quality_label", "Sin analizar"),
+    }
+
+
+class ReferenceOffsetRequest(BaseModel):
+    offset_seconds: float = 0.0
+
+
+@app.post("/api/voices/{voice_id}/offset")
+def set_reference_offset(voice_id: str, request: ReferenceOffsetRequest):
+    """
+    Elige desde qué segundo se toma la referencia.
+
+    El recorte automático se queda con el principio, que no siempre es el
+    mejor tramo: puede haber una respiración, ruido o una frase poco
+    representativa. Esto permite mover ese punto sin editar el archivo fuera.
+    """
+    path = find_audio(VOICES_DIR, voice_id)
+    write_reference_offset(path, request.offset_seconds)
+    MODEL_MANAGER.invalidate_voice(voice_id)
+    _, metadata = prepare_reference_audio(path, force=True)
+    return {
+        "ok": True,
+        "voice_id": voice_id,
+        "offset_seconds": read_reference_offset(path),
+        "duration": (metadata.get("prepared_analysis") or {}).get("duration"),
         "quality_score": metadata.get("quality_score", 0),
         "quality_label": metadata.get("quality_label", "Sin analizar"),
     }
@@ -2047,12 +2141,13 @@ def generate(request: GenerateRequest):
             backend,
         )
 
-        import soundfile as sf
-
         extension = request.output_format
         filename = f"locucion_{int(time.time())}_{uuid.uuid4().hex[:5]}.{extension}"
         output_path = OUTPUTS_DIR / filename
 
+        wav, sample_rate = resample_output(
+            wav, sample_rate, request.output_sample_rate
+        )
         write_audio(output_path, wav, sample_rate, extension)
 
         history_item = {
@@ -2138,6 +2233,24 @@ def generate(request: GenerateRequest):
         MODEL_MANAGER.end_generation()
         if request.request_id:
             clear_generation_cancelled(request.request_id)
+
+
+@app.post("/api/normalize")
+def normalize_preview(request: NormalizeRequest):
+    """
+    Cómo se leerá el guion, sin generar nada.
+
+    Una locución cuesta minutos en CPU: descubrir ahí que un precio se leyó
+    mal significa tirar toda esa espera. Esto responde al instante.
+    """
+    clean, removed = sanitize_script(request.text.strip())
+    spoken = normalize_spanish(clean)
+    return {
+        "spoken": spoken,
+        "changed": spoken != clean,
+        "removed_characters": removed,
+        "characters": len(spoken),
+    }
 
 
 @app.post("/api/generate/cancel")

@@ -105,3 +105,21 @@ El motor local es distinto: ese sí se actualiza solo, y la app consulta siempre
   propósito. La puntuación de calidad aparece sola en unos segundos.
 - Que la app tarde algo más la primera vez: la música incluida se convierte a
   WAV una sola vez, ya sin bloquear el arranque.
+
+## Funciones que ahorran tiempo
+
+Una locución cuesta minutos en CPU. Estas existen para no desperdiciarlos:
+
+- **Vista previa de lectura.** Al escribir aparece *"ASÍ SE LEERÁ"* con el
+  texto ya normalizado, si difiere de lo escrito. Sirve para detectar un
+  precio o una hora mal interpretados **antes** de gastar la generación.
+- **Cola.** El botón `+` junto a Generar encola el guion y limpia el editor.
+  Se procesan uno tras otro sin vigilar la pantalla. Cada trabajo lleva su
+  propia copia de los ajustes, así que seguir editando no altera lo encolado.
+- **Reutilizar del historial.** El icono de recarga en cada entrada devuelve
+  guion, voz y ajustes de esa locución para hacer una variación.
+- **Tramo de la referencia.** Con audios de más de 19 s aparece un control
+  para elegir desde qué segundo se toman los 18 s que se usan; el recorte
+  automático se queda con el principio, que no siempre es el mejor tramo.
+- **Formato y frecuencia.** MP3 para enviar (un spot de 10 s pesa ~40 KB en
+  vez de ~470 KB) y 44.1 kHz cuando la emisora lo pide.

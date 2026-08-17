@@ -277,3 +277,29 @@ dialog{width:min(540px,calc(100vw - 40px));padding:0;border:1px solid var(--line
 .update-icon svg{width:16px;height:16px}
 .update-copy strong{display:block;font-size:.58rem}
 .update-copy small{display:block;margin-top:3px;color:var(--muted);font-size:.46rem;line-height:1.4}
+.spoken-preview{margin-top:12px;padding:10px 12px;border:1px solid var(--line);border-left:2px solid var(--accent);border-radius:10px;background:var(--surface-2)}
+.spoken-preview[hidden]{display:none}
+.spoken-eyebrow{display:block;color:var(--faint);font-size:.44rem;font-weight:760;letter-spacing:.08em}
+.spoken-preview p{margin:5px 0 0;color:var(--muted);font-size:.55rem;line-height:1.5}
+.history-item{grid-template-columns:26px minmax(0,1fr) auto auto}
+.history-reuse{display:grid;place-items:center;width:24px;height:24px;border-radius:7px;color:var(--faint);transition:background var(--fast),color var(--fast)}
+.history-reuse svg{width:13px}
+.history-item:hover .history-reuse{color:var(--text);background:var(--surface)}
+.queue-panel{margin:0 0 10px;padding:10px 12px;border:1px solid var(--line);border-radius:12px;background:var(--surface-2)}
+.queue-panel[hidden]{display:none}
+.queue-head{display:flex;align-items:center;gap:9px}
+.queue-head strong{font-size:.56rem}
+.queue-badge{min-width:18px;padding:1px 6px;border-radius:999px;background:var(--accent-soft);color:var(--accent-strong);font-size:.45rem;font-weight:760;text-align:center}
+.queue-head .secondary-button{margin-left:auto;padding:3px 9px;font-size:.46rem}
+.queue-list{margin-top:7px;max-height:118px;overflow-y:auto}
+.queue-row{display:grid;grid-template-columns:18px minmax(0,1fr) auto;align-items:center;gap:8px;padding:5px 0;border-top:1px solid var(--line)}
+.queue-index{color:var(--faint);font-size:.45rem;font-variant-numeric:tabular-nums}
+.queue-copy{min-width:0}
+.queue-copy strong{display:block;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-size:.5rem;font-weight:600}
+.queue-copy small{display:block;margin-top:1px;color:var(--faint);font-size:.43rem}
+.queue-add{display:grid;place-items:center;width:38px;height:38px;border:1px solid var(--line);border-radius:11px;background:var(--surface-2);color:var(--muted);transition:color var(--fast),border-color var(--fast)}
+.queue-add:hover{color:var(--text);border-color:var(--accent)}
+.queue-add svg{width:16px}
+.reference-trim{margin-top:10px;padding:10px 12px;border:1px solid var(--line);border-radius:11px;background:var(--surface-2)}
+.reference-trim[hidden]{display:none}
+.reference-trim .setting-note{margin-top:6px}
