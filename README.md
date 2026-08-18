@@ -762,3 +762,39 @@ Measured on an RTX 4070, a 48-character script that should last 3.5 s, with a
   handed back for an X-vector request on the same voice;
 - re-analyses references saved by earlier engines instead of serving their
   stale verdict.
+
+
+---
+
+# engine 1.0.6 — The engine picks the reference segment
+
+Which part of a long reference gets used decides most of the clone quality, and
+a slider asked the user to choose it — a decision nobody can make without
+listening to the whole file. The engine now scores candidate windows and keeps
+the one with the cleanest, best-levelled speech.
+
+What dominates that score is how much sound remains in the gaps between words.
+Voice-only recordings drop to near zero; a radio spot carries a music bed and
+the floor stays high. Measured on real references: 0.04 (voice only), 0.25,
+0.65 (continuous music).
+
+Same voice, same script, only the segment changes (speaker similarity from the
+model's own extractor, 100% = identical to the original):
+
+| Segment | Similarity | Spread across takes |
+|---|---|---|
+| Start of file, music underneath | 65.7% | 13.6 |
+| **Picked automatically** | **86.7%** | **2.8** |
+
+Twenty-one points and five times more consistent, with no setting touched. The
+window it finds inside a radio spot scores like a studio recording (a clean
+reference measures 87.5%).
+
+- drops the manual "Tramo usado" control;
+- requires at least 55% speech in a window, so a near-silent stretch — which
+  would score a perfect floor with no voice — cannot win;
+- makes reference transcription optional and off by default: measured paired by
+  seed on a clean reference, ICL and speaker-embedding cloning tie (−0.06
+  points, 4 of 6), so the ~250 MB model is no longer downloaded for everyone;
+- re-analyses references saved by earlier engines, which would otherwise keep
+  their old segment forever.

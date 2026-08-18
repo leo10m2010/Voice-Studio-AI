@@ -2,7 +2,7 @@ import "./styles.css";
 
 const API = "http://127.0.0.1:8765";
 const DEFAULT_MODEL_ID = "Qwen/Qwen3-TTS-12Hz-0.6B-Base";
-const REQUIRED_ENGINE_VERSION = "1.0.5";
+const REQUIRED_ENGINE_VERSION = "1.0.6";
 
 const icons = {
   wave: `<svg viewBox="0 0 24 24"><path d="M4 13v-2M8 17V7M12 20V4M16 16V8M20 13v-2"/></svg>`,

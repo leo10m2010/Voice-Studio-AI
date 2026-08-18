@@ -148,6 +148,46 @@ Efecto secundario del mismo fallo: la caché de referencias no distinguía ICL d
 X-vector, así que generar con transcripción y luego sin ella devolvía el prompt
 equivocado. Ya no.
 
+### "El clon no se parece lo suficiente"
+
+Lo que más decide **no es ningún ajuste**: es qué trozo de la referencia se usa.
+
+Una grabación de voz sola baja casi a cero entre palabras. Un spot de radio
+lleva música debajo y no calla nunca; al clonar, el modelo no distingue "voz"
+de "voz + música" y se traga la música como si fuera parte del timbre.
+
+Medido sobre la misma voz y el mismo guion, cambiando solo el tramo usado
+(similitud de locutor con el extractor del propio modelo, 100% = idéntico):
+
+| Tramo | Similitud | Dispersión entre tomas |
+|---|---|---|
+| Principio, con música debajo | 65,7% | 13,6 |
+| **Elegido automáticamente** | **86,7%** | **2,8** |
+
+Veintiún puntos y cinco veces más consistente. Desde el motor **1.0.6** esa
+elección la hace el motor solo: puntúa las ventanas candidatas y se queda con
+la que trae voz limpia, bien nivelada y sin saturar. Por eso desapareció el
+control "Tramo usado": era una decisión que nadie puede tomar sin escuchar el
+audio entero.
+
+Si aun así quieres el máximo, dale **10–15 s de voz sola**, sin música ni
+ambiente de fondo. Con una referencia así el clon puntúa 87,5%, y el tramo que
+el motor encuentra dentro de un spot llega prácticamente a lo mismo.
+
+### "¿Y la transcripción de la referencia, para qué sirve?"
+
+Para el modo ICL, que Qwen recomienda para máxima fidelidad. Pero medido aquí
+—emparejando por semilla sobre una referencia limpia— ICL y clonar solo con la
+huella de voz **empatan**: −0,06 puntos, ICL gana 4 de 6. No compra fidelidad.
+
+Por eso transcribir la referencia es opcional y viene apagado: **Ajustes →
+Transcribir referencias**. Al encenderlo descarga un modelo de ~250 MB la
+primera vez y transcribe solo el tramo que se usa de verdad. Si lo dejas
+apagado no se descarga nada.
+
+Lo que sí importa de la transcripción es que **coincida** con el audio: ver el
+apartado de arriba sobre la voz que repetía el mismo audio.
+
 ### El motor no responde al abrir la app
 
 Aparece el aviso "El motor local no se pudo iniciar" con Reintentar y

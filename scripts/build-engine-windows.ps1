@@ -61,6 +61,11 @@ try {
         --collect-submodules sklearn.feature_extraction `
         --collect-submodules sklearn.neighbors `
         --hidden-import sklearn `
+        --collect-data faster_whisper `
+        --collect-submodules faster_whisper `
+        --collect-dynamic-libs ctranslate2 `
+        --hidden-import ctranslate2 `
+        --hidden-import tokenizers `
         --hidden-import qwen_tts.inference.qwen3_tts_model `
         --hidden-import qwen_tts.inference.qwen3_tts_tokenizer `
         --hidden-import qwen_tts.core.models.configuration_qwen3_tts `

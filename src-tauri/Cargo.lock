@@ -2388,7 +2388,7 @@ dependencies = [
 
 [[package]]
 name = "qwen-voice-studio"
-version = "0.8.3"
+version = "0.8.4"
 dependencies = [
  "hex",
  "reqwest 0.12.28",
