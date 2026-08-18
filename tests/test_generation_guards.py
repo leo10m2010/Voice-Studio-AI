@@ -784,6 +784,14 @@ class CatalogoDeVocesTest(unittest.TestCase):
             def raise_for_status(self):
                 return None
 
+            @property
+            def content(self):
+                # El motor lee content y decodifica con utf-8-sig, porque el
+                # manifiesto lo escribe PowerShell y puede colar un BOM.
+                import json as _json
+
+                return _json.dumps(self._datos).encode("utf-8")
+
             def json(self):
                 return self._datos
 

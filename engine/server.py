@@ -251,7 +251,9 @@ def sync_remote_voices() -> dict:
         if respuesta.status_code == 404:
             return resultado
         respuesta.raise_for_status()
-        manifiesto = respuesta.json()
+        # El manifiesto lo escribe un script de PowerShell y ahí es fácil que
+        # cuele un BOM: se quita antes de parsear en vez de fallar por eso.
+        manifiesto = json.loads(respuesta.content.decode("utf-8-sig"))
     except Exception as exc:
         resultado["error"] = f"{type(exc).__name__}: {exc}"
         return resultado

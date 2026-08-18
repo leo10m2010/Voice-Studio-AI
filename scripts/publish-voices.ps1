@@ -1,6 +1,9 @@
 param(
     [string]$Tag = "voices-latest",
-    [string]$VoiceDir = "assets/voice"
+    [string]$VoiceDir = "assets/voice",
+    # Sin esto sube todas las de la carpeta, que ya viajan en el instalador.
+    # Normalmente solo interesan las publicadas despues del ultimo instalador.
+    [string[]]$Only = @()
 )
 
 # Publica las voces de assets/voice como catálogo descargable.
@@ -21,15 +24,30 @@ if (-not $repo) { throw "No se pudo determinar el repositorio con gh." }
 
 $carpeta = Resolve-Path $VoiceDir
 $audios = Get-ChildItem $carpeta -File | Where-Object { $_.Extension -in ".mp3", ".wav", ".flac" }
+if ($Only.Count -gt 0) {
+    $audios = $audios | Where-Object { $Only -contains $_.Name -or $Only -contains $_.BaseName }
+    if ($audios.Count -ne $Only.Count) {
+        throw "No se encontraron todas las voces pedidas en $carpeta."
+    }
+}
 if ($audios.Count -eq 0) { throw "No hay voces en $carpeta." }
 
 Write-Host "Repositorio: $repo" -ForegroundColor Cyan
 Write-Host "Voces encontradas: $($audios.Count)" -ForegroundColor Cyan
 
-if (-not (gh release view $Tag --repo $repo 2>$null)) {
-    gh release create $Tag --repo $repo --title "Catálogo de voces" `
-        --notes "Voces descargables de Voice Studio AI. El motor consulta este catálogo al arrancar."
+# gh escribe en stderr cuando la Release no existe y, con ErrorActionPreference
+# en Stop, PowerShell 5.1 lo convierte en excepcion aunque sea el caso normal.
+$previo = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+gh release view $Tag --repo $repo | Out-Null
+$existe = ($LASTEXITCODE -eq 0)
+$ErrorActionPreference = $previo
+
+if (-not $existe) {
+    gh release create $Tag --repo $repo --title "Catalogo de voces" `
+        --notes "Voces descargables de Voice Studio AI. El motor consulta este catalogo al arrancar."
     if ($LASTEXITCODE -ne 0) { throw "No se pudo crear la Release $Tag." }
+    Write-Host "Release $Tag creada." -ForegroundColor Green
 }
 
 $entradas = @()
@@ -60,7 +78,10 @@ $manifiesto = [ordered]@{
 }
 
 $destino = Join-Path $env:TEMP "voices-manifest.json"
-$manifiesto | ConvertTo-Json -Depth 6 | Out-File $destino -Encoding utf8
+# Out-File -Encoding utf8 escribe BOM en PowerShell 5.1 y eso rompe a cualquier
+# lector estricto de JSON. Se escribe UTF-8 sin BOM a proposito.
+$json = $manifiesto | ConvertTo-Json -Depth 6
+[System.IO.File]::WriteAllText($destino, $json, (New-Object System.Text.UTF8Encoding $false))
 gh release upload $Tag $destino --repo $repo --clobber
 if ($LASTEXITCODE -ne 0) { throw "No se pudo subir el manifiesto." }
 

@@ -224,6 +224,38 @@ Esa llamada no se puede abortar desde fuera. Lo que sí hace la app:
 - **Recuperarlo**: el botón **Reintentar** del aviso reemplaza el proceso del
   motor. Es la única cura real; cerrar y abrir la app hace lo mismo.
 
+## Repartir voces a todos los equipos
+
+Hay dos formas y no hacen lo mismo:
+
+**Agregar voz desde la app** → se queda **solo en ese equipo**, en
+`%LOCALAPPDATA%\QwenVoiceStudiooices`. No viaja a ninguna parte.
+
+**Catálogo de voces** → llega a todos los equipos **sin sacar instalador**. Es
+una Release fija (`voices-latest`) cuyo `voices-manifest.json` se sobrescribe en
+cada publicación, igual que el catálogo del motor. Se publica con:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\publish-voices.ps1 -Only Mi_Voz.mp3
+```
+
+Sin `-Only` sube todas las de `assets/voice`, que ya viajan en el instalador;
+normalmente solo interesan las publicadas después.
+
+Los equipos la reciben al abrir la app, o al pulsar **Buscar voces nuevas** en
+la hoja de voces. Detalles que conviene saber:
+
+- **Nunca pisa una voz que ya tengas.** Si la editaste o le pusiste
+  transcripción, tu copia manda.
+- **Borrarla del catálogo no la borra** de los equipos que ya la tienen.
+- La transcripción viaja dentro del JSON, así que llega junto con el audio.
+- Se verifica el SHA-256 antes de dejarla en la biblioteca; una descarga
+  cortada no deja media voz.
+
+Las voces de `assets/voice` siguen existiendo y viajan **dentro del
+instalador**: solo llegan cuando el equipo instala esa versión de la app. Para
+una voz suelta, el catálogo es mucho menos ceremonia.
+
 ## Avisos de versión
 
 Al abrir, la app consulta si hay una Release más reciente y muestra una franja
