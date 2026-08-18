@@ -729,3 +729,36 @@ sentence and voice:
   traceback to the engine log, where the diagnostics button picks it up;
 - requires engine `1.0.4`, so existing installations are offered the update on
   open.
+
+
+---
+
+# engine 1.0.5 — Reference transcript validation
+
+Adding a voice with a pasted transcript produced a long take that did not say
+the script. ICL conditions the model on "this audio says this text"; a long
+reference is trimmed to 18 s but the transcript was kept whole, so the pair no
+longer matched and the model stopped emitting its end token, running to
+`max_new_tokens`.
+
+Measured on an RTX 4070, a 48-character script that should last 3.5 s, with a
+13.7 s reference:
+
+| Transcript | Implied rate | Result |
+|---|---|---|
+| Exact (202 chars) | 14.7 chars/s | 3.92 s — correct |
+| None (X-vector) | — | 3.68 s — correct |
+| Too long (326) | 23.8 chars/s | 10.48 s — wrong |
+| Too short (68) | 5.0 chars/s | 30.64 s — unusable |
+| Quadrupled (1307) | 95.4 chars/s | 30.64 s — unusable |
+
+- drops a transcript whose length does not match the prepared reference
+  duration and clones from the speaker embedding instead, which always works,
+  reporting why so the user can fix it;
+- stops awarding quality points for merely having a transcript: an unusable
+  reference scored "Excelente 96" and now scores "Mejorable" with the note that
+  says what to change;
+- keys the reference-prompt cache by mode, so an ICL prompt is no longer
+  handed back for an X-vector request on the same voice;
+- re-analyses references saved by earlier engines instead of serving their
+  stale verdict.

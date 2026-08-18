@@ -9,7 +9,7 @@ on:
       engine_version:
         description: "Version del motor"
         required: true
-        default: "1.0.4"
+        default: "1.0.5"
       flavor:
         description: "Motor a construir"
         required: true

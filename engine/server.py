@@ -912,10 +912,17 @@ def prepared_voice_path(audio_path: Path) -> Path:
     return PREPARED_DIR / f"{audio_path.stem}.wav"
 
 
+# Se sube cuando cambia cómo se analiza o se prepara una referencia, para que
+# las voces ya importadas se vuelvan a medir en vez de servir un veredicto
+# obsoleto. La 2 corrige la puntuación que daba "Excelente" a transcripciones
+# que no corresponden al audio usado.
+REFERENCE_ANALYSIS_VERSION = 2
+
+
 def reference_cache_signature(audio_path: Path, transcript: str) -> str:
     stat = audio_path.stat()
     digest = hashlib.sha1(transcript.encode("utf-8")).hexdigest()[:12]
-    return f"{stat.st_mtime_ns}:{stat.st_size}:{digest}"
+    return f"v{REFERENCE_ANALYSIS_VERSION}:{stat.st_mtime_ns}:{stat.st_size}:{digest}"
 
 
 def analyze_reference_audio(audio_path: Path, transcript: str = "") -> dict:
@@ -988,8 +995,17 @@ def analyze_reference_audio(audio_path: Path, transcript: str = "") -> dict:
         else:
             notes.append("Hay clipping notable; usa una grabación más limpia.")
 
-        if transcript.strip():
+        # Puntuar por "tiene transcripción" mentía: una que no corresponde al
+        # audio no suma fidelidad, la destruye. La voz de 73 s recortada a 18 s
+        # con su transcripción entera salía "Excelente 96" y era inservible.
+        usable, motivo = usable_icl_transcript(transcript, duration)
+        if usable:
             score += 35
+        elif transcript.strip():
+            notes.append(
+                f"{motivo} Para usar ICL, recorta el audio a {REFERENCE_MAX_SECONDS:.0f} s "
+                "o menos y pega la transcripción de ese tramo."
+            )
         else:
             notes.append("Falta transcripción exacta: se usará X-vector y la fidelidad puede bajar.")
 
@@ -1014,6 +1030,7 @@ def analyze_reference_audio(audio_path: Path, transcript: str = "") -> dict:
             "quality_label": label,
             "notes": notes,
             "has_transcript": bool(transcript.strip()),
+            "transcript_usable": bool(usable),
         }
     except Exception as exc:
         return {
@@ -1027,6 +1044,7 @@ def analyze_reference_audio(audio_path: Path, transcript: str = "") -> dict:
             "quality_label": "Sin analizar",
             "notes": [f"No se pudo analizar: {type(exc).__name__}"],
             "has_transcript": bool(transcript.strip()),
+            "transcript_usable": False,
         }
 
 
@@ -1306,6 +1324,62 @@ def split_text_for_tts(text: str, max_chars: int = TTS_CHUNK_CHARS) -> list[str]
     return chunks or [text]
 
 
+# ICL (usar la transcripción de la referencia) solo funciona si ese texto es lo
+# que de verdad se oye en el audio preparado. Con cualquier desajuste el modelo
+# deja de emitir el token de fin y agota max_new_tokens: devuelve una locución
+# larguísima que no dice el guion. Medido en una RTX 4070, guion de 48
+# caracteres que debería durar 3.5 s, referencia de 13.7 s:
+#
+#   texto exacto (202 car, 14.7 car/s) ->  3.92 s   1.12x   correcto
+#   sin texto (x-vector)               ->  3.68 s   1.05x   correcto
+#   texto de más (326 car, 23.8 car/s) -> 10.48 s   2.99x   mal
+#   texto de menos (68 car, 5.0 car/s) -> 30.64 s   8.75x   inservible
+#   texto x4 (1307 car, 95.4 car/s)    -> 30.64 s   8.75x   inservible
+#
+# Una transcripción equivocada es mucho peor que ninguna, así que ante la duda
+# se descarta y se clona solo con la huella de voz.
+#
+# El disparador real en producción: una referencia larga se recorta a 18 s pero
+# la transcripción pegada describe el audio entero. Una voz de 73 s con su
+# transcripción completa da 53.9 car/s y cae de lleno en el último caso.
+ICL_CHARS_PER_SECOND = 14.0
+ICL_RATIO_MIN = 0.55
+ICL_RATIO_MAX = 1.60
+
+
+def usable_icl_transcript(
+    transcript: Optional[str], prepared_seconds: float
+) -> tuple[str, Optional[str]]:
+    """
+    Decide si la transcripción describe el audio que se va a usar.
+
+    Devuelve (texto_a_usar, motivo_del_descarte). El texto vacío significa
+    clonar solo con la huella de voz, que siempre funciona.
+    """
+    texto = (transcript or "").strip()
+    if not texto:
+        return "", None
+    if prepared_seconds <= 0:
+        return "", "No se pudo medir la referencia."
+
+    esperados = prepared_seconds * ICL_CHARS_PER_SECOND
+    proporcion = len(texto) / esperados
+
+    if proporcion > ICL_RATIO_MAX:
+        return "", (
+            f"La transcripción ({len(texto)} caracteres) describe mucho más de "
+            f"lo que dura la referencia usada ({prepared_seconds:.0f} s). "
+            "Se clonó solo con la huella de voz."
+        )
+    if proporcion < ICL_RATIO_MIN:
+        return "", (
+            f"La transcripción ({len(texto)} caracteres) describe mucho menos "
+            f"de lo que dura la referencia usada ({prepared_seconds:.0f} s). "
+            "Se clonó solo con la huella de voz."
+        )
+    return texto, None
+
+
 def estimate_max_new_tokens(text: str) -> int:
     words = max(1, len(re.findall(r"\b\w+\b", text, flags=re.UNICODE)))
     # 12 Hz audio tokenizer. Rough margin based on normal Spanish speech rates.
@@ -1581,13 +1655,21 @@ class ModelManager:
         backend: str,
     ):
         prepared_path, metadata = prepare_reference_audio(voice_path)
-        transcript = ref_text or ""
+        duracion = float(
+            (metadata.get("prepared_analysis") or {}).get("duration") or 0.0
+        )
+        transcript, icl_rechazo = usable_icl_transcript(ref_text, duracion)
+
         signature = metadata.get("signature", "")
-        key = f"{self.model_id}|{backend}|{voice_path.stem}|{signature}"
+        # El modo va en la clave: dos prompts del mismo audio, uno ICL y otro
+        # solo x-vector, son objetos distintos. Sin esto, generar con
+        # transcripción y luego sin ella devolvía el prompt ICL cacheado.
+        modo = f"icl:{hashlib.sha1(transcript.encode()).hexdigest()[:12]}" if transcript else "xvec"
+        key = f"{self.model_id}|{backend}|{voice_path.stem}|{signature}|{modo}"
 
         if key in self.prompt_cache:
             self.prompt_cache.move_to_end(key)
-            return self.prompt_cache[key], prepared_path
+            return self.prompt_cache[key], prepared_path, icl_rechazo
 
         prompt = model.create_voice_clone_prompt(
             ref_audio=str(prepared_path),
@@ -1597,7 +1679,7 @@ class ModelManager:
         self.prompt_cache[key] = prompt
         while len(self.prompt_cache) > PROMPT_CACHE_MAX:
             self.prompt_cache.popitem(last=False)
-        return prompt, prepared_path
+        return prompt, prepared_path, icl_rechazo
 
     def generate(
         self,
@@ -1685,12 +1767,14 @@ class ModelManager:
 
         effective_language = None if language == "Auto" else language
 
-        prompt, prepared_path = self.get_clone_prompt(
+        prompt, prepared_path, icl_rechazo = self.get_clone_prompt(
             model=model,
             voice_path=voice_path,
             ref_text=ref_text,
             backend=actual_backend,
         )
+        if icl_rechazo:
+            print(f"[icl] transcripción descartada: {icl_rechazo}")
 
         chunks = split_text_for_tts(text)
         outputs = []
@@ -1747,7 +1831,7 @@ class ModelManager:
                 combined_parts.append(np.asarray(wav, dtype=np.float32))
             combined = np.concatenate(combined_parts)
 
-        return combined, int(sample_rate or 24000), actual_backend
+        return combined, int(sample_rate or 24000), actual_backend, icl_rechazo
 
 
 MODEL_MANAGER = ModelManager()
@@ -2291,7 +2375,7 @@ def generate(request: GenerateRequest):
     )
 
     try:
-        wav, sample_rate, backend = MODEL_MANAGER.generate(
+        wav, sample_rate, backend, icl_rechazo = MODEL_MANAGER.generate(
             text=spoken_text,
             voice_path=voice_path,
             ref_text=ref_text,
@@ -2368,7 +2452,7 @@ def generate(request: GenerateRequest):
             # added, swapped, or removed later without regenerating the TTS.
             "dry_filename": filename if not request.music_id else None,
             "url": f"/api/outputs/{filename}",
-            "used_transcript": bool(ref_text),
+            "used_transcript": bool(ref_text) and not icl_rechazo,
             "settings": {
                 "speed": round(clamp(request.speed, 0.70, 1.35), 2),
                 "profile": request.profile,
@@ -2409,11 +2493,12 @@ def generate(request: GenerateRequest):
             "sample_rate": sample_rate,
             "filename": filename,
             "url": f"/api/outputs/{filename}",
-            "used_transcript": bool(ref_text),
+            "used_transcript": bool(ref_text) and not icl_rechazo,
             "history": history_item,
             "qwen_sampling": generation,
             "removed_characters": removed,
             "spoken_text": spoken_text if spoken_text != text else None,
+            "transcript_ignored": icl_rechazo,
         }
     except GenerationCancelled as exc:
         STATUS.set("idle", "Motor listo", "Generación cancelada por el usuario.", MODEL_MANAGER.backend)

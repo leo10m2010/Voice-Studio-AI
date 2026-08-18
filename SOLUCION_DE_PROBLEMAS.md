@@ -109,6 +109,45 @@ Dos cosas más cambiaron a raíz de esto:
 - El aviso ya no vuelca la traza de PyTorch. El texto completo queda en el
   registro del motor, que es donde sirve.
 
+### "Agregué una voz y no la clona: repite el mismo audio"
+
+Síntoma: se genera un guion corto y sale una locución larguísima que no dice lo
+escrito, sino algo parecido a la referencia.
+
+Causa: la transcripción pegada no corresponde al audio que el motor usa de
+verdad. Una referencia larga **se recorta a 18 s**, pero la transcripción se
+guardaba entera. En modo ICL el modelo condiciona sobre "este audio dice este
+texto"; si no cuadra, deja de emitir el token de fin y agota el máximo de
+tokens.
+
+Medido en una RTX 4070, guion de 48 caracteres que debería durar 3,5 s, con una
+referencia de 13,7 s:
+
+| Transcripción | Velocidad implícita | Resultado |
+|---|---|---|
+| Exacta (202 car.) | 14,7 car/s | 3,92 s — correcto |
+| Ninguna (X-vector) | — | 3,68 s — correcto |
+| De más (326 car.) | 23,8 car/s | 10,48 s — mal |
+| De menos (68 car.) | 5,0 car/s | 30,64 s — inservible |
+| Cuádruple (1307 car.) | 95,4 car/s | 30,64 s — inservible |
+
+Una transcripción equivocada es mucho peor que ninguna. Desde el motor
+**1.0.5**, si el texto no encaja con la duración de la referencia usada, se
+descarta y se clona solo con la huella de voz; la app dice por qué al terminar.
+
+Para aprovechar ICL, que sí mejora la fidelidad:
+
+- usa una referencia de **18 s o menos** (lo ideal, 10–15 s);
+- pega la transcripción **de ese tramo**, no la del audio completo.
+
+La puntuación de la voz ahora refleja esto: antes se sumaban 35 puntos por
+"tener transcripción" sin comprobar nada, y una voz inservible salía
+"Excelente 96". Ahora sale "Mejorable" con la nota que explica qué corregir.
+
+Efecto secundario del mismo fallo: la caché de referencias no distinguía ICL de
+X-vector, así que generar con transcripción y luego sin ella devolvía el prompt
+equivocado. Ya no.
+
 ### El motor no responde al abrir la app
 
 Aparece el aviso "El motor local no se pudo iniciar" con Reintentar y

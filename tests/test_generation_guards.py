@@ -406,5 +406,143 @@ class FriendlyErrorTest(unittest.TestCase):
         self.assertIn("voz no encontrada", mensaje)
 
 
+class IclTranscriptTest(unittest.TestCase):
+    """
+    ICL solo funciona si la transcripción es lo que de verdad se oye en el
+    audio preparado. Con desajuste el modelo nunca emite el token de fin y
+    agota max_new_tokens. Medido en una RTX 4070, guion que debería durar
+    3.5 s con referencia de 13.7 s:
+
+      texto exacto (202 car)  ->  3.92 s   correcto
+      sin texto               ->  3.68 s   correcto
+      texto de más (326 car)  -> 10.48 s   mal
+      texto de menos (68 car) -> 30.64 s   inservible
+      texto x4 (1307 car)     -> 30.64 s   inservible
+
+    El caso real: una voz de 73 s se recorta a 18 s pero conserva la
+    transcripción entera; 970 caracteres para 18 s son 53.9 car/s.
+    """
+
+    def test_una_transcripcion_que_corresponde_se_usa(self):
+        # 13.7 s de audio, 202 caracteres: 14.7 car/s.
+        texto, motivo = server.usable_icl_transcript("x" * 202, 13.7)
+        self.assertEqual(len(texto), 202)
+        self.assertIsNone(motivo)
+
+    def test_el_caso_real_de_entel_se_descarta(self):
+        texto, motivo = server.usable_icl_transcript("x" * 970, 18.0)
+        self.assertEqual(texto, "")
+        self.assertIn("más", motivo)
+
+    def test_texto_de_menos_se_descarta(self):
+        texto, motivo = server.usable_icl_transcript("x" * 68, 13.7)
+        self.assertEqual(texto, "")
+        self.assertIn("menos", motivo)
+
+    def test_sin_transcripcion_no_es_un_descarte(self):
+        # x-vector es un modo legítimo, no un fallo: no hay motivo que contar.
+        for vacio in ("", "   ", None):
+            with self.subTest(vacio=repr(vacio)):
+                texto, motivo = server.usable_icl_transcript(vacio, 13.7)
+                self.assertEqual(texto, "")
+                self.assertIsNone(motivo)
+
+    def test_sin_duracion_medida_no_se_arriesga(self):
+        texto, motivo = server.usable_icl_transcript("x" * 200, 0.0)
+        self.assertEqual(texto, "")
+        self.assertIsNotNone(motivo)
+
+    def test_acepta_el_rango_de_velocidad_de_habla_normal(self):
+        # 10 s de audio: se aceptan de 77 a 224 caracteres.
+        for n in (80, 140, 200):
+            with self.subTest(n=n):
+                texto, _ = server.usable_icl_transcript("x" * n, 10.0)
+                self.assertEqual(len(texto), n)
+
+    def test_recorta_espacios_antes_de_medir(self):
+        texto, motivo = server.usable_icl_transcript("  " + "x" * 140 + "  ", 10.0)
+        self.assertEqual(len(texto), 140)
+        self.assertIsNone(motivo)
+
+
+class PromptCacheModeTest(unittest.TestCase):
+    """
+    La clave de la caché no distinguía ICL de x-vector, así que generar con
+    transcripción y luego sin ella devolvía el prompt ICL cacheado: la segunda
+    locución salía rota heredando el modo de la primera.
+    """
+
+    def test_icl_y_xvector_no_comparten_entrada(self):
+        llamadas = []
+
+        class ModeloFalso:
+            def create_voice_clone_prompt(self, ref_audio, ref_text, x_vector_only_mode):
+                llamadas.append(x_vector_only_mode)
+                return f"prompt-{'xvec' if x_vector_only_mode else 'icl'}"
+
+        manager = server.ModelManager()
+        manager.model_id = "modelo"
+        voz = Path("Animador.mp3")
+        metadata = {"signature": "firma", "prepared_analysis": {"duration": 10.0}}
+        original = server.prepare_reference_audio
+        server.prepare_reference_audio = lambda path, force=False: (path, metadata)
+        self.addCleanup(setattr, server, "prepare_reference_audio", original)
+
+        icl, _, _ = manager.get_clone_prompt(ModeloFalso(), voz, "x" * 140, "cpu")
+        xvec, _, _ = manager.get_clone_prompt(ModeloFalso(), voz, None, "cpu")
+
+        self.assertEqual(icl, "prompt-icl")
+        self.assertEqual(xvec, "prompt-xvec")
+        self.assertEqual(llamadas, [False, True])
+
+    def test_la_misma_peticion_sigue_reutilizando_la_cache(self):
+        llamadas = []
+
+        class ModeloFalso:
+            def create_voice_clone_prompt(self, ref_audio, ref_text, x_vector_only_mode):
+                llamadas.append(x_vector_only_mode)
+                return "prompt"
+
+        manager = server.ModelManager()
+        manager.model_id = "modelo"
+        voz = Path("Animador.mp3")
+        metadata = {"signature": "firma", "prepared_analysis": {"duration": 10.0}}
+        original = server.prepare_reference_audio
+        server.prepare_reference_audio = lambda path, force=False: (path, metadata)
+        self.addCleanup(setattr, server, "prepare_reference_audio", original)
+
+        manager.get_clone_prompt(ModeloFalso(), voz, "x" * 140, "cpu")
+        manager.get_clone_prompt(ModeloFalso(), voz, "x" * 140, "cpu")
+        self.assertEqual(len(llamadas), 1)
+
+
+class ReferenceScoreTest(unittest.TestCase):
+    """Puntuar por "tiene transcripción" mentía: la voz de 73 s recortada a
+    18 s con su transcripción entera salía "Excelente 96" y era inservible."""
+
+    def _analiza(self, segundos, transcript):
+        import numpy as np
+        import soundfile as sf
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as carpeta:
+            ruta = Path(carpeta) / "ref.wav"
+            n = int(24000 * segundos)
+            onda = (0.2 * np.sin(2 * np.pi * 180 * np.arange(n) / 24000)).astype("float32")
+            sf.write(str(ruta), onda, 24000)
+            return server.analyze_reference_audio(ruta, transcript)
+
+    def test_una_transcripcion_que_no_corresponde_no_suma(self):
+        buena = self._analiza(14.0, "x" * 200)
+        mala = self._analiza(14.0, "x" * 970)
+        self.assertTrue(buena["transcript_usable"])
+        self.assertFalse(mala["transcript_usable"])
+        self.assertGreater(buena["quality_score"], mala["quality_score"])
+
+    def test_lo_explica_en_las_notas(self):
+        mala = self._analiza(14.0, "x" * 970)
+        self.assertTrue(any("recorta" in n for n in mala["notes"]))
+
+
 if __name__ == "__main__":
     unittest.main()
