@@ -24,10 +24,18 @@ if (-not $repo) { throw "No se pudo determinar el repositorio con gh." }
 
 $carpeta = Resolve-Path $VoiceDir
 $audios = Get-ChildItem $carpeta -File | Where-Object { $_.Extension -in ".mp3", ".wav", ".flac" }
-if ($Only.Count -gt 0) {
-    $audios = $audios | Where-Object { $Only -contains $_.Name -or $Only -contains $_.BaseName }
-    if ($audios.Count -ne $Only.Count) {
-        throw "No se encontraron todas las voces pedidas en $carpeta."
+# Invocado con -File, PowerShell pasa "a.mp3,b.mp3" como UNA cadena en vez de
+# como array, asi que se separa a mano y se aceptan las dos formas.
+$pedidas = @()
+foreach ($item in $Only) {
+    $pedidas += ($item -split ",") | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+}
+
+if ($pedidas.Count -gt 0) {
+    $audios = @($audios | Where-Object { $pedidas -contains $_.Name -or $pedidas -contains $_.BaseName })
+    $faltan = @($pedidas | Where-Object { $nombre = $_; -not ($audios | Where-Object { $_.Name -eq $nombre -or $_.BaseName -eq $nombre }) })
+    if ($faltan.Count -gt 0) {
+        throw "No estan en $carpeta : $($faltan -join ', ')"
     }
 }
 if ($audios.Count -eq 0) { throw "No hay voces en $carpeta." }
