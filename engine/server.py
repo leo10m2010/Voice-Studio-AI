@@ -342,6 +342,17 @@ class LibraryWarmUp:
         except Exception as exc:
             print(f"[warm-up] no se pudo limpiar outputs: {exc}")
 
+        # Preparar en paralelo parece la mejora obvia y no lo es: casi todo el
+        # tiempo se va en que numba compile librosa la primera vez, y esa
+        # compilación se serializa con un cerrojo. Medido con 35 voces en
+        # proceso nuevo:
+        #
+        #   en serie                      5.4 s
+        #   4 hilos                       8.0 s
+        #   precalentar + 4 hilos         7.5 s
+        #
+        # Los hilos se estorban compilando a la vez, y precalentar aparte solo
+        # paga el JIT dos veces. Se deja en serie a propósito.
         for path in sorted(VOICES_DIR.iterdir()):
             if not path.is_file() or path.suffix.lower() not in ALLOWED_AUDIO:
                 continue
