@@ -63,7 +63,7 @@ try {
         --hidden-import sklearn `
         --collect-data faster_whisper `
         --collect-submodules faster_whisper `
-        --collect-dynamic-libs ctranslate2 `
+        --collect-binaries ctranslate2 `
         --hidden-import ctranslate2 `
         --hidden-import tokenizers `
         --hidden-import qwen_tts.inference.qwen3_tts_model `
