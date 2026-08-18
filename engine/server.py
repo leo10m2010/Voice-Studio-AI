@@ -217,6 +217,101 @@ def transcript_path(audio_path: Path) -> Path:
     return audio_path.with_suffix(audio_path.suffix + ".txt")
 
 
+# Catálogo remoto de voces. Mismo patrón que el motor: una Release fija cuyo
+# JSON se sobrescribe en cada publicación, para que una app antigua también vea
+# las voces nuevas. Sirve para repartir voces a todos los equipos sin sacar
+# instalador: las incluidas en assets/ solo llegan al instalar una versión
+# nueva de la app.
+VOICE_CATALOG_URL = os.environ.get("VOICE_STUDIO_VOICE_CATALOG") or (
+    "https://github.com/leo10m2010/Voice-Studio-AI/releases/download/"
+    "voices-latest/voices-manifest.json"
+)
+VOICE_DOWNLOAD_MAX_BYTES = 25 * 1024 * 1024
+VOICE_CATALOG_TIMEOUT = 20
+
+
+def _voice_catalog_entries(manifest: dict) -> list[dict]:
+    entradas = manifest.get("voices") if isinstance(manifest, dict) else None
+    return [e for e in (entradas or []) if isinstance(e, dict)]
+
+
+def sync_remote_voices() -> dict:
+    """
+    Trae del catálogo las voces que aún no estén en la biblioteca.
+
+    Nunca pisa una voz existente: si la editaste o le pusiste transcripción, tu
+    copia manda. Sin red falla en silencio; esto corre en el arranque y no puede
+    retrasar ni romper nada.
+    """
+    import requests
+
+    resultado = {"revisadas": 0, "descargadas": [], "error": None}
+    try:
+        respuesta = requests.get(VOICE_CATALOG_URL, timeout=VOICE_CATALOG_TIMEOUT)
+        if respuesta.status_code == 404:
+            return resultado
+        respuesta.raise_for_status()
+        manifiesto = respuesta.json()
+    except Exception as exc:
+        resultado["error"] = f"{type(exc).__name__}: {exc}"
+        return resultado
+
+    for entrada in _voice_catalog_entries(manifiesto):
+        nombre = str(entrada.get("name") or "")
+        url = str(entrada.get("url") or "")
+        esperado = str(entrada.get("sha256") or "").lower()
+        resultado["revisadas"] += 1
+
+        # El nombre viene de un JSON remoto: se acepta solo un archivo suelto,
+        # con extensión conocida, dentro de la carpeta de voces.
+        if not nombre or Path(nombre).name != nombre or ".." in nombre:
+            continue
+        if Path(nombre).suffix.lower() not in ALLOWED_AUDIO:
+            continue
+        if not url.startswith("https://"):
+            continue
+        if len(esperado) != 64 or not all(c in "0123456789abcdef" for c in esperado):
+            continue
+
+        destino = VOICES_DIR / nombre
+        if destino.exists():
+            continue
+
+        try:
+            with requests.get(url, timeout=VOICE_CATALOG_TIMEOUT, stream=True) as r:
+                r.raise_for_status()
+                trozos, total, digest = [], 0, hashlib.sha256()
+                for trozo in r.iter_content(chunk_size=256 * 1024):
+                    total += len(trozo)
+                    if total > VOICE_DOWNLOAD_MAX_BYTES:
+                        raise RuntimeError("La voz supera el tamaño permitido.")
+                    digest.update(trozo)
+                    trozos.append(trozo)
+            if digest.hexdigest() != esperado:
+                raise RuntimeError("El SHA-256 no coincide.")
+
+            # Se escribe aparte y se mueve al final: así una descarga cortada
+            # no deja media voz en la biblioteca.
+            parcial = destino.with_suffix(destino.suffix + ".parcial")
+            parcial.write_bytes(b"".join(trozos))
+            parcial.replace(destino)
+
+            texto = entrada.get("transcript")
+            if isinstance(texto, str) and texto.strip():
+                transcript_path(destino).write_text(texto.strip(), encoding="utf-8")
+
+            resultado["descargadas"].append(nombre)
+            print(f"[voces] descargada del catálogo: {nombre}")
+        except Exception as exc:
+            print(f"[voces] no se pudo traer {nombre}: {type(exc).__name__}: {exc}")
+            try:
+                destino.with_suffix(destino.suffix + ".parcial").unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    return resultado
+
+
 def copy_seed_assets() -> None:
     """
     Seeds the user library from the bundled assets.
@@ -331,6 +426,13 @@ class LibraryWarmUp:
             copy_seed_assets()
         except Exception as exc:
             print(f"[warm-up] no se pudieron copiar los recursos incluidos: {exc}")
+
+        # Voces publicadas después del instalador. Va aquí, con el puerto ya
+        # abierto, y falla en silencio sin red: no puede retrasar el arranque.
+        try:
+            sync_remote_voices()
+        except Exception as exc:
+            print(f"[warm-up] no se pudo consultar el catálogo de voces: {exc}")
         finally:
             with self._lock:
                 self._seeding = False
@@ -2212,6 +2314,15 @@ def system():
 
 class AsrRequest(BaseModel):
     enabled: bool
+
+
+@app.post("/api/voices/sync")
+def voices_sync():
+    """Busca voces nuevas en el catálogo sin esperar al próximo arranque."""
+    resultado = sync_remote_voices()
+    for nombre in resultado["descargadas"]:
+        WARM_UP.schedule(VOICES_DIR / nombre)
+    return resultado
 
 
 @app.get("/api/asr")

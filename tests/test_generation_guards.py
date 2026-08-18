@@ -753,5 +753,141 @@ class AsrOpcionalTest(unittest.TestCase):
         self.assertFalse(server.asr_enabled())
 
 
+class CatalogoDeVocesTest(unittest.TestCase):
+    """
+    El catálogo reparte voces a todos los equipos sin sacar instalador. Como el
+    manifiesto viene de la red, cada campo se valida antes de tocar el disco.
+    """
+
+    def setUp(self):
+        import tempfile
+
+        self.carpeta = tempfile.TemporaryDirectory()
+        self.addCleanup(self.carpeta.cleanup)
+        self.previo = server.VOICES_DIR
+        server.VOICES_DIR = Path(self.carpeta.name)
+        self.addCleanup(setattr, server, "VOICES_DIR", self.previo)
+        self.descargas = []
+
+    def _falso_requests(self, manifiesto, cuerpo=b"audio"):
+        import hashlib
+
+        prueba = self
+
+        class Respuesta:
+            status_code = 200
+
+            def __init__(self, datos=None, contenido=None):
+                self._datos = datos
+                self._contenido = contenido
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return self._datos
+
+            def iter_content(self, chunk_size=0):
+                yield self._contenido
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        class Modulo:
+            @staticmethod
+            def get(url, timeout=0, stream=False):
+                if url.endswith("voices-manifest.json"):
+                    return Respuesta(datos=manifiesto)
+                prueba.descargas.append(url)
+                return Respuesta(contenido=cuerpo)
+
+        import sys
+
+        original = sys.modules.get("requests")
+        sys.modules["requests"] = Modulo
+        self.addCleanup(
+            lambda: sys.modules.__setitem__("requests", original)
+            if original
+            else sys.modules.pop("requests", None)
+        )
+        return hashlib.sha256(cuerpo).hexdigest()
+
+    def _entrada(self, **cambios):
+        base = {
+            "name": "Nueva.mp3",
+            "url": "https://ejemplo/Nueva.mp3",
+            "sha256": "0" * 64,
+            "transcript": "Hola.",
+        }
+        base.update(cambios)
+        return base
+
+    def test_descarga_una_voz_nueva_con_su_transcripcion(self):
+        digest = self._falso_requests({"voices": [self._entrada()]})
+        # el sha del manifiesto tiene que ser el real
+        digest2 = self._falso_requests({"voices": [self._entrada(sha256=digest)]})
+        r = server.sync_remote_voices()
+        self.assertEqual(r["descargadas"], ["Nueva.mp3"])
+        destino = server.VOICES_DIR / "Nueva.mp3"
+        self.assertTrue(destino.exists())
+        self.assertEqual(server.transcript_path(destino).read_text(encoding="utf-8"), "Hola.")
+
+    def test_un_sha_que_no_cuadra_no_deja_nada(self):
+        self._falso_requests({"voices": [self._entrada(sha256="a" * 64)]})
+        r = server.sync_remote_voices()
+        self.assertEqual(r["descargadas"], [])
+        self.assertFalse((server.VOICES_DIR / "Nueva.mp3").exists())
+        self.assertFalse((server.VOICES_DIR / "Nueva.mp3.parcial").exists())
+
+    def test_no_pisa_una_voz_que_ya_tienes(self):
+        # Si la editaste o le pusiste transcripción, tu copia manda.
+        destino = server.VOICES_DIR / "Nueva.mp3"
+        destino.write_bytes(b"lo mio")
+        digest = self._falso_requests({"voices": [self._entrada()]})
+        self._falso_requests({"voices": [self._entrada(sha256=digest)]})
+        server.sync_remote_voices()
+        self.assertEqual(destino.read_bytes(), b"lo mio")
+        self.assertEqual(self.descargas, [])
+
+    def test_rechaza_nombres_que_se_salen_de_la_carpeta(self):
+        for nombre in ("../fuera.mp3", "sub/dir.mp3", "..\fuera.mp3"):
+            with self.subTest(nombre=nombre):
+                self._falso_requests({"voices": [self._entrada(name=nombre)]})
+                server.sync_remote_voices()
+                self.assertEqual(self.descargas, [])
+
+    def test_rechaza_extensiones_que_no_son_audio(self):
+        self._falso_requests({"voices": [self._entrada(name="script.exe")]})
+        server.sync_remote_voices()
+        self.assertEqual(self.descargas, [])
+
+    def test_rechaza_urls_que_no_son_https(self):
+        self._falso_requests({"voices": [self._entrada(url="http://ejemplo/a.mp3")]})
+        server.sync_remote_voices()
+        self.assertEqual(self.descargas, [])
+
+    def test_sin_red_no_revienta(self):
+        import sys
+
+        class Modulo:
+            @staticmethod
+            def get(*a, **k):
+                raise OSError("sin red")
+
+        original = sys.modules.get("requests")
+        sys.modules["requests"] = Modulo
+        self.addCleanup(
+            lambda: sys.modules.__setitem__("requests", original)
+            if original
+            else sys.modules.pop("requests", None)
+        )
+        r = server.sync_remote_voices()
+        self.assertEqual(r["descargadas"], [])
+        self.assertIsNotNone(r["error"])
+
+
 if __name__ == "__main__":
     unittest.main()

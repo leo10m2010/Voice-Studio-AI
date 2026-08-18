@@ -421,6 +421,7 @@ document.querySelector("#app").innerHTML = `
     <div class="search-box">${icons.search}<input id="voiceSearch" placeholder="Buscar voces…"></div>
     <div class="sheet-toolbar">
       <button class="secondary-button pressable" id="addVoice">${icons.plus}<span>Agregar voz</span></button>
+      <button class="secondary-button pressable" id="syncVoices">${icons.wave}<span>Buscar voces nuevas</span></button>
     </div>
     <div class="sheet-list" id="voiceList"></div>
   </div>
@@ -628,7 +629,7 @@ const el = {
   settingsPanel: $("#settingsPanel"), historyPanel: $("#historyPanel"), tabs: $("#tabs"), historySearch: $("#historySearch"), historyList: $("#historyList"), clearHistory: $("#clearHistory"),
   selectorSheet: $("#selectorSheet"), selectorBack: $("#selectorBack"), selectorTitle: $("#selectorTitle"), selectorSubtitle: $("#selectorSubtitle"),
   voiceSheetView: $("#voiceSheetView"), modelSheetView: $("#modelSheetView"),
-  voiceSearch: $("#voiceSearch"), voiceList: $("#voiceList"), addVoice: $("#addVoice"), voiceFile: $("#voiceFile"),
+  voiceSearch: $("#voiceSearch"), voiceList: $("#voiceList"), addVoice: $("#addVoice"), syncVoices: $("#syncVoices"), voiceFile: $("#voiceFile"),
   compatibleModelList: $("#compatibleModelList"),
   transcriptDialog: $("#transcriptDialog"), transcriptForm: $("#transcriptForm"), transcriptInput: $("#transcriptInput"), saveTranscript: $("#saveTranscript"), removeTranscript: $("#removeTranscript"),
   voiceImportDialog: $("#voiceImportDialog"), voiceImportForm: $("#voiceImportForm"), importSummary: $("#importSummary"), importTranscript: $("#importTranscript"), confirmVoiceImport: $("#confirmVoiceImport"),
@@ -2181,6 +2182,23 @@ el.applyMusic.onclick=()=>{
 el.removeMusic.onclick=()=>{
   if(!state.result?.music_id)return toast("Esta locución no tiene música aplicada.","error");
   updateResultMusic(null);
+};
+// Las voces incluidas solo llegan al instalar una versión nueva. El catálogo
+// remoto reparte voces nuevas a todos los equipos sin instalador; esto lo
+// consulta a mano, sin esperar al próximo arranque.
+el.syncVoices.onclick=async()=>{
+  el.syncVoices.disabled=true;
+  try{
+    const r=await api("/api/voices/sync",{method:"POST",signal:AbortSignal.timeout(120000)});
+    if(r.descargadas?.length){
+      await refreshData();
+      toast(`${r.descargadas.length} voz(ces) nueva(s): ${r.descargadas.join(", ")}`,"success");
+    }else if(r.error){
+      toast("No se pudo consultar el catálogo. ¿Hay conexión?","error");
+    }else{
+      toast("No hay voces nuevas.","success");
+    }
+  }catch(e){toast(e.message,"error");}finally{el.syncVoices.disabled=false;}
 };
 el.speakerBoost.onclick=()=>{toggle(el.speakerBoost);savePreferences()};
 // Transcribir la referencia no mejora la fidelidad de forma medible (ICL y
