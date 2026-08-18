@@ -897,5 +897,77 @@ class CatalogoDeVocesTest(unittest.TestCase):
         self.assertIsNotNone(r["error"])
 
 
+class BorrarUnaLocucionTest(unittest.TestCase):
+    """
+    Antes solo se podía vaciar el historial entero, así que quitar una toma
+    fallida obligaba a tirar también las buenas.
+    """
+
+    def setUp(self):
+        import tempfile
+
+        self.carpeta = tempfile.TemporaryDirectory()
+        self.addCleanup(self.carpeta.cleanup)
+        raiz = Path(self.carpeta.name)
+        self.salidas = raiz / "outputs"
+        self.salidas.mkdir()
+        self.historial = raiz / "history.json"
+
+        for atributo, valor in (("HISTORY_PATH", self.historial), ("OUTPUTS_DIR", self.salidas)):
+            if hasattr(server, atributo):
+                self.addCleanup(setattr, server, atributo, getattr(server, atributo))
+                setattr(server, atributo, valor)
+
+    def _sembrar(self, items):
+        server.save_history(items)
+
+    def test_quita_solo_la_pedida(self):
+        self._sembrar([
+            {"id": "uno", "filename": "a.mp3"},
+            {"id": "dos", "filename": "b.mp3"},
+        ])
+        (self.salidas / "a.mp3").write_bytes(b"a")
+        (self.salidas / "b.mp3").write_bytes(b"b")
+
+        server.delete_history_item("uno")
+
+        quedan = [i["id"] for i in server.load_history()]
+        self.assertEqual(quedan, ["dos"])
+
+    def test_se_lleva_su_audio_y_respeta_el_de_las_demas(self):
+        self._sembrar([
+            {"id": "uno", "filename": "a.mp3"},
+            {"id": "dos", "filename": "b.mp3"},
+        ])
+        (self.salidas / "a.mp3").write_bytes(b"a")
+        (self.salidas / "b.mp3").write_bytes(b"b")
+
+        server.delete_history_item("uno")
+
+        self.assertFalse((self.salidas / "a.mp3").exists())
+        self.assertTrue((self.salidas / "b.mp3").exists())
+
+    def test_un_audio_compartido_no_se_borra(self):
+        # Cambiar la música reusa el mismo audio seco en otra entrada.
+        self._sembrar([
+            {"id": "uno", "filename": "mezcla.mp3", "dry_filename": "seco.mp3"},
+            {"id": "dos", "filename": "otra.mp3", "dry_filename": "seco.mp3"},
+        ])
+        for n in ("mezcla.mp3", "otra.mp3", "seco.mp3"):
+            (self.salidas / n).write_bytes(b"x")
+
+        server.delete_history_item("uno")
+
+        self.assertFalse((self.salidas / "mezcla.mp3").exists())
+        self.assertTrue((self.salidas / "seco.mp3").exists())
+
+    def test_una_que_no_existe_da_404(self):
+        self._sembrar([{"id": "uno", "filename": "a.mp3"}])
+        with self.assertRaises(server.HTTPException) as caught:
+            server.delete_history_item("no-existe")
+        self.assertEqual(caught.exception.status_code, 404)
+        self.assertEqual(len(server.load_history()), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

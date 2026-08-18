@@ -987,16 +987,34 @@ function renderHistory(){
   const q=el.historySearch.value.trim().toLowerCase();
   const list=state.history.filter(h=>!q||`${h.title} ${h.voice_name} ${h.model_name||""}`.toLowerCase().includes(q));
   el.historyList.innerHTML=list.length?list.map((h,i)=>`
-    <button class="history-item pressable" data-history-id="${esc(h.id)}" style="--i:${i}">
-      <span class="history-play">${icons.play}</span>
-      <span class="history-copy"><strong>${esc(h.title)}</strong><small>${esc(h.voice_name)} · ${esc(h.model_name||"Qwen")}${h.music_name?` · ♪ ${esc(h.music_name)}`:""} · ${prettyDate(h.created_at)}</small></span>
-      <span class="history-format">${esc((h.filename||"wav").split(".").pop().toUpperCase())}</span>
-      <span class="history-reuse" data-reuse="${esc(h.id)}" title="Reutilizar guion y ajustes">${icons.refresh}</span>
-    </button>`).join(""):`<div class="empty-list"><strong>Aún no hay historial</strong><span>Las locuciones aparecerán aquí.</span></div>`;
+    <div class="history-item" style="--i:${i}">
+      <button class="history-main pressable" data-history-id="${esc(h.id)}">
+        <span class="history-play">${icons.play}</span>
+        <span class="history-copy"><strong>${esc(h.title)}</strong><small>${esc(h.voice_name)} · ${esc(h.model_name||"Qwen")}${h.music_name?` · ♪ ${esc(h.music_name)}`:""} · ${prettyDate(h.created_at)}</small></span>
+        <span class="history-format">${esc((h.filename||"wav").split(".").pop().toUpperCase())}</span>
+      </button>
+      <button class="history-reuse pressable" data-reuse="${esc(h.id)}" title="Reutilizar guion y ajustes" aria-label="Reutilizar guion y ajustes">${icons.refresh}</button>
+      <button class="history-drop pressable" data-drop="${esc(h.id)}" title="Quitar del historial" aria-label="Quitar del historial">${icons.trash||icons.close||"×"}</button>
+    </div>`).join(""):`<div class="empty-list"><strong>Aún no hay historial</strong><span>Las locuciones aparecerán aquí.</span></div>`;
+  // Reutilizar y borrar son botones hermanos, no controles dentro del botón de
+  // la fila: anidarlos era HTML inválido y no se alcanzaban con el teclado.
+  $$("[data-reuse]").forEach(b=>b.onclick=()=>{
+    const item=state.history.find(h=>h.id===b.dataset.reuse);
+    if(item)reuseHistoryItem(item);
+  });
+  $$("[data-drop]").forEach(b=>b.onclick=async()=>{
+    const id=b.dataset.drop;
+    b.disabled=true;
+    try{
+      await api(`/api/history/${encodeURIComponent(id)}`,{method:"DELETE"});
+      state.history=state.history.filter(h=>h.id!==id);
+      renderHistory();
+      toast("Locución quitada del historial.","success");
+    }catch(e){toast(e.message,"error");b.disabled=false;}
+  });
   $$("[data-history-id]").forEach(b=>b.onclick=e=>{
     const item=state.history.find(h=>h.id===b.dataset.historyId);
     if(!item)return;
-    if(e.target.closest("[data-reuse]"))return reuseHistoryItem(item);
     setResultAudio(`${API}${item.url}`,item.filename,item.voice_name,item);
   });
 }

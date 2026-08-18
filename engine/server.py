@@ -2382,6 +2382,26 @@ def clear_history():
     return {"ok": True, "removed_files": prune_orphan_outputs([])}
 
 
+@app.delete("/api/history/{history_id}")
+def delete_history_item(history_id: str):
+    """
+    Borra una locución suelta.
+
+    Antes solo se podía vaciar el historial entero, así que quitar una toma
+    fallida obligaba a tirar también las buenas.
+    """
+    items = load_history()
+    quedan = [item for item in items if str(item.get("id")) != history_id]
+    if len(quedan) == len(items):
+        raise HTTPException(status_code=404, detail="Esa locución ya no está en el historial.")
+
+    save_history(quedan)
+    # Los audios que ya no referencia nadie se van con ella; los que comparta
+    # con otra entrada se quedan.
+    prune_orphan_outputs(quedan)
+    return {"ok": True, "removed": history_id, "remaining": len(quedan)}
+
+
 @app.get("/api/voices")
 def voices():
     return list_audio(VOICES_DIR, include_transcript=True)
