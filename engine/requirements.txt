@@ -14,3 +14,9 @@ numpy>=1.26,<3
 scikit-learn>=1.3,<2
 
 huggingface_hub>=0.34,<2
+
+# Transcribe el tramo de referencia que se usa de verdad, para poder clonar en
+# modo ICL sin pedirle el texto al usuario. Sin esto solo queda la huella de
+# voz: 78.4% de similitud frente a 83.1%, y seis veces más deriva de voz en
+# guiones largos. Pesa ~64 MB; el modelo baja aparte a la caché de la app.
+faster-whisper>=1.1,<2

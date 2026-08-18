@@ -589,5 +589,169 @@ class IclGreedyTest(unittest.TestCase):
         self.assertEqual(fiel, copia)
 
 
+class AutoTranscriptTest(unittest.TestCase):
+    """
+    Transcribir el tramo que de verdad se usa es lo que hace utilizable el modo
+    ICL, que Qwen recomienda para máxima fidelidad. Pedirle el texto al usuario
+    no funciona: pega el del audio completo, el motor recorta a 18 s y el par
+    deja de cuadrar.
+    """
+
+    def setUp(self):
+        self.meta = {"signature": "firma", "prepared_analysis": {"duration": 18.0}}
+        original = server.prepare_reference_audio
+        server.prepare_reference_audio = lambda path, force=False: (path, self.meta)
+        self.addCleanup(setattr, server, "prepare_reference_audio", original)
+        self.llamadas = []
+
+        class ModeloFalso:
+            def create_voice_clone_prompt(inner, ref_audio, ref_text, x_vector_only_mode):
+                self.llamadas.append(ref_text)
+                return "prompt"
+
+        self.modelo = ModeloFalso()
+        self.manager = server.ModelManager()
+        self.manager.model_id = "modelo"
+
+    def test_sustituye_a_la_pegada_cuando_esta_no_cuadra(self):
+        # 970 caracteres para 18 s son 53.9 car/s: el caso real que fallaba.
+        self.meta["auto_transcript"] = "y" * 250
+        _, _, rechazo = self.manager.get_clone_prompt(
+            self.modelo, Path("entel.mp3"), "x" * 970, "cpu"
+        )
+        self.assertEqual(self.llamadas, ["y" * 250])
+        self.assertIsNone(rechazo)
+
+    def test_la_pegada_manda_si_cuadra(self):
+        # Es la del usuario: si describe el tramo, es mejor fuente que el ASR.
+        self.meta["auto_transcript"] = "y" * 250
+        self.manager.get_clone_prompt(self.modelo, Path("v.mp3"), "x" * 250, "cpu")
+        self.assertEqual(self.llamadas, ["x" * 250])
+
+    def test_sin_transcripcion_pegada_usa_la_automatica(self):
+        self.meta["auto_transcript"] = "y" * 250
+        self.manager.get_clone_prompt(self.modelo, Path("v.mp3"), None, "cpu")
+        self.assertEqual(self.llamadas, ["y" * 250])
+
+    def test_si_el_asr_no_dio_nada_se_clona_con_huella_de_voz(self):
+        # Sin red o sin modelo ASR la generación no puede caerse.
+        self.meta["auto_transcript"] = ""
+        self.manager.get_clone_prompt(self.modelo, Path("v.mp3"), None, "cpu")
+        self.assertEqual(self.llamadas, [None])
+
+    def test_una_transcripcion_automatica_absurda_tambien_se_descarta(self):
+        # El ASR puede alucinar en audio con música o ruido.
+        self.meta["auto_transcript"] = "y" * 4000
+        self.manager.get_clone_prompt(self.modelo, Path("v.mp3"), None, "cpu")
+        self.assertEqual(self.llamadas, [None])
+
+    def test_transcribir_nunca_tumba_la_generacion(self):
+        original = server.asr_model
+        server.asr_model = lambda: (_ for _ in ()).throw(RuntimeError("sin red"))
+        self.addCleanup(setattr, server, "asr_model", original)
+        try:
+            self.assertEqual(server.transcribe_reference(Path("no_existe.wav")), "")
+        except RuntimeError:
+            self.fail("transcribe_reference dejó escapar la excepción")
+
+
+class TramoAutomaticoTest(unittest.TestCase):
+    """
+    El tramo lo elige el motor. Antes había un control para elegirlo a mano y
+    era una decisión que nadie puede tomar sin escuchar el audio entero.
+
+    Lo que se busca es voz limpia: medido sobre referencias reales, con la
+    limpia el clon puntuó 87.5% con 4.8 puntos de dispersión entre tomas, y con
+    una que lleva música de fondo, 77.2% con 33 puntos.
+    """
+
+    def _onda(self, segundos, sr=24000, con_silencios=True, amplitud=0.3, suelo=0.0):
+        import numpy as np
+
+        n = int(segundos * sr)
+        t = np.arange(n) / sr
+        y = (amplitud * np.sin(2 * np.pi * 180 * t)).astype("float32")
+        if con_silencios:
+            for k in range(1, int(segundos)):
+                y[int((k - 0.35) * sr) : int(k * sr)] = 0.0
+        if suelo:
+            y = y + (suelo * np.sin(2 * np.pi * 55 * t)).astype("float32")
+        return y.astype("float32")
+
+    def test_el_suelo_distingue_voz_sola_de_musica_de_fondo(self):
+        # Lo que importa es que separe, no el valor absoluto: en referencias
+        # reales va de 0.04 (voz sola) a 0.65 (spot con música debajo).
+        limpia = server.background_floor(self._onda(6), 24000)
+        con_musica = server.background_floor(self._onda(6, suelo=0.12), 24000)
+        self.assertLess(limpia, 0.2)
+        self.assertGreater(con_musica, limpia * 2)
+
+    def test_elige_la_ventana_limpia_y_no_la_del_principio(self):
+        import numpy as np
+
+        sucio = self._onda(20, suelo=0.15)
+        limpio = self._onda(20)
+        elegido = server.limit_reference_length(
+            np.concatenate([sucio, limpio]), 24000
+        )
+        self.assertLess(server.background_floor(elegido, 24000), 0.3)
+
+    def test_un_tramo_casi_vacio_nunca_gana(self):
+        # Tiene el suelo perfecto y ninguna voz: sin la guarda ganaría siempre.
+        import numpy as np
+
+        silencio = np.zeros(int(18 * 24000), dtype="float32")
+        self.assertEqual(server.score_reference_window(silencio, 24000), -1.0)
+
+    def test_respeta_el_tramo_guardado_por_un_motor_anterior(self):
+        import numpy as np
+
+        y = self._onda(40)
+        elegido = server.limit_reference_length(y, 24000, offset_seconds=10.0)
+        self.assertLessEqual(len(elegido) / 24000, server.REFERENCE_MAX_SECONDS + 0.01)
+
+    def test_una_referencia_corta_no_se_recorta(self):
+        y = self._onda(10)
+        self.assertEqual(len(server.limit_reference_length(y, 24000)), len(y))
+
+
+class AsrOpcionalTest(unittest.TestCase):
+    """
+    Transcribir no compra fidelidad: emparejando por semilla sobre referencia
+    limpia, ICL y huella de voz empatan (-0.06 puntos, 4 de 6). Por eso el
+    modelo de 250 MB no se le descarga a nadie sin pedirlo.
+    """
+
+    def setUp(self):
+        self.bandera = server.DATA_ROOT / "asr_enabled.flag"
+        self.previo = self.bandera.read_text(encoding="utf-8") if self.bandera.exists() else None
+        self.addCleanup(self._restaurar)
+
+    def _restaurar(self):
+        if self.previo is None:
+            self.bandera.unlink(missing_ok=True)
+        else:
+            self.bandera.write_text(self.previo, encoding="utf-8")
+
+    def test_viene_apagado(self):
+        self.bandera.unlink(missing_ok=True)
+        self.assertFalse(server.asr_enabled())
+
+    def test_apagado_no_transcribe_ni_carga_el_modelo(self):
+        server.set_asr_enabled(False)
+        llamadas = []
+        original = server.asr_model
+        server.asr_model = lambda: llamadas.append(1)
+        self.addCleanup(setattr, server, "asr_model", original)
+        self.assertEqual(server.transcribe_reference(Path("da_igual.wav")), "")
+        self.assertEqual(llamadas, [])
+
+    def test_el_interruptor_persiste(self):
+        server.set_asr_enabled(True)
+        self.assertTrue(server.asr_enabled())
+        server.set_asr_enabled(False)
+        self.assertFalse(server.asr_enabled())
+
+
 if __name__ == "__main__":
     unittest.main()

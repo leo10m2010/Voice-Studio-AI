@@ -257,11 +257,6 @@ document.querySelector("#app").innerHTML = `
               </button>
             </div>
 
-            <div class="reference-trim" id="referenceTrim" hidden>
-              <div class="slider-title"><label>Tramo usado</label><output id="trimValue">desde 0 s</output></div>
-              <input id="referenceTrimRange" type="range" min="0" max="0" step="0.5" value="0">
-              <p class="setting-note" id="trimNote"></p>
-            </div>
 
             <div class="reference-card" id="referenceCard">
               <div class="reference-score" id="referenceScore"><strong>—</strong><small>/100</small></div>
@@ -376,6 +371,11 @@ document.querySelector("#app").innerHTML = `
             <div class="toggle-row">
               <div><label>Realce de voz</label><small>Presencia y normalización local</small></div>
               <button class="toggle on pressable" id="speakerBoost" aria-pressed="true"><span></span></button>
+            </div>
+
+            <div class="toggle-row">
+              <div><label>Transcribir referencias</label><small id="asrNote">Descarga un modelo de ~250 MB la primera vez</small></div>
+              <button class="toggle pressable" id="asrToggle" aria-pressed="false"><span></span></button>
             </div>
 
             <details class="advanced">
@@ -618,14 +618,13 @@ const el = {
   musicButton: $("#musicButton"), musicPopover: $("#musicPopover"), applyMusic: $("#applyMusic"), removeMusic: $("#removeMusic"),
   playerVolume: $("#playerVolume"), download: $("#downloadButton"), bottomVoice: $("#bottomVoice"), bottomMode: $("#bottomMode"),
   hardware: $("#hardwareText"), voiceSelector: $("#voiceSelector"), selectedVoiceName: $("#selectedVoiceName"), selectedVoiceMeta: $("#selectedVoiceMeta"),
-  referenceTrim: $("#referenceTrim"), referenceTrimRange: $("#referenceTrimRange"), trimValue: $("#trimValue"), trimNote: $("#trimNote"),
   referenceScore: $("#referenceScore"), referenceLabel: $("#referenceLabel"), referenceDetails: $("#referenceDetails"), improveClone: $("#improveClone"),
   modelSelector: $("#modelSelector"), selectedModelAvatar: $("#selectedModelAvatar"), selectedModelName: $("#selectedModelName"), selectedModelMeta: $("#selectedModelMeta"),
   modelInstallCard: $("#modelInstallCard"), modelInstallTitle: $("#modelInstallTitle"), modelInstallMeta: $("#modelInstallMeta"), installSelectedModel: $("#installSelectedModel"),
   profileButtons: $("#profileButtons"), speed: $("#speed"), speedValue: $("#speedValue"), stability: $("#stability"), style: $("#style"),
   pitch: $("#pitch"), pitchValue: $("#pitchValue"), output: $("#outputFormat"), soundSelect: $("#soundSelect"), previewSound: $("#previewSound"),
   addSound: $("#addSound"), repairSounds: $("#repairSounds"), soundFile: $("#soundFile"), musicVolume: $("#musicVolume"), musicVolumeValue: $("#musicVolumeValue"), musicStatus: $("#musicStatus"),
-  speakerBoost: $("#speakerBoost"), mode: $("#mode"), reset: $("#resetSettings"), theme: $("#themeButton"),
+  speakerBoost: $("#speakerBoost"), asrToggle: $("#asrToggle"), asrNote: $("#asrNote"), mode: $("#mode"), reset: $("#resetSettings"), theme: $("#themeButton"),
   settingsPanel: $("#settingsPanel"), historyPanel: $("#historyPanel"), tabs: $("#tabs"), historySearch: $("#historySearch"), historyList: $("#historyList"), clearHistory: $("#clearHistory"),
   selectorSheet: $("#selectorSheet"), selectorBack: $("#selectorBack"), selectorTitle: $("#selectorTitle"), selectorSubtitle: $("#selectorSubtitle"),
   voiceSheetView: $("#voiceSheetView"), modelSheetView: $("#modelSheetView"),
@@ -896,49 +895,11 @@ function updateReference(){
   const dur=v.duration?`${Number(v.duration).toFixed(1)} s`:"duración desconocida";
   el.referenceDetails.textContent=`${dur} · ${v.has_transcript?"ICL":"X-vector"} · ${v.prepared?"24 kHz mono preparado":"original"}`;
 }
-// El recorte automático se queda con el principio del audio, que no siempre
-// es el mejor tramo. Solo tiene sentido ofrecer esto cuando sobra material.
-const TRIM_WINDOW_SECONDS=18;
-function updateReferenceTrim(){
-  const v=state.voice;
-  const total=Number(v?.source_duration||0);
-  if(!v||!total||total<=TRIM_WINDOW_SECONDS+1){
-    el.referenceTrim.hidden=true;
-    return;
-  }
-  el.referenceTrim.hidden=false;
-  const max=Math.max(0,Math.floor((total-TRIM_WINDOW_SECONDS)*2)/2);
-  el.referenceTrimRange.max=String(max);
-  el.referenceTrimRange.value=String(Math.min(Number(v.offset_seconds||0),max));
-  renderTrimLabels(total);
-}
-function renderTrimLabels(total){
-  const start=Number(el.referenceTrimRange.value)||0;
-  const end=Math.min(total,start+TRIM_WINDOW_SECONDS);
-  el.trimValue.textContent=`desde ${start.toFixed(1)} s`;
-  el.trimNote.textContent=`Se usarán ${start.toFixed(1)}–${end.toFixed(1)} s de ${total.toFixed(1)} s. El resto se descarta.`;
-}
-async function applyReferenceTrim(){
-  const v=state.voice;
-  if(!v)return;
-  const offset=Number(el.referenceTrimRange.value)||0;
-  el.referenceTrimRange.disabled=true;
-  try{
-    const result=await api(`/api/voices/${encodeURIComponent(v.id)}/offset`,{
-      method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({offset_seconds:offset}),
-      signal:AbortSignal.timeout(120000)
-    });
-    await refreshData();
-    state.voice=state.voices.find(x=>x.id===v.id)||state.voice;
-    updateVoiceUI();
-    toast(`Tramo aplicado · ${result.quality_label} (${result.quality_score}/100)`,"success");
-  }catch(e){
-    toast(e.message,"error");
-  }finally{
-    el.referenceTrimRange.disabled=false;
-  }
-}
+// El tramo de la referencia lo elige el motor: puntúa las ventanas candidatas
+// por cuánta voz limpia traen y se queda con la mejor. Antes había aquí un
+// control para elegirlo a mano, y era una decisión que nadie puede tomar sin
+// escuchar el audio entero.
+function updateReferenceTrim(){}
 function updateVoiceUI(){
   if(!state.voice){
     el.selectedVoiceName.textContent="Selecciona una voz";el.selectedVoiceMeta.textContent="Mis voces";
@@ -2158,8 +2119,6 @@ el.installSelectedModel.onclick=()=>{
 el.voiceSearch.oninput=()=>renderVoices(el.voiceSearch.value);
 el.addVoice.onclick=()=>el.voiceFile.click();el.voiceFile.onchange=()=>{const f=el.voiceFile.files?.[0];if(f)prepareImport(f);el.voiceFile.value=""};
 el.voiceImportForm.onsubmit=async e=>{if(e.submitter?.value==="cancel")return;e.preventDefault();if(!state.pendingVoiceFile)return;el.confirmVoiceImport.disabled=true;try{await importVoice(state.pendingVoiceFile,el.importTranscript.value.trim());el.voiceImportDialog.close();state.pendingVoiceFile=null;toast("Voz importada y preparada.","success")}catch(err){toast(err.message,"error")}finally{el.confirmVoiceImport.disabled=false}};
-el.referenceTrimRange.oninput=()=>renderTrimLabels(Number(state.voice?.source_duration||0));
-el.referenceTrimRange.onchange=applyReferenceTrim;
 el.improveClone.onclick=openTranscript;el.transcriptForm.onsubmit=async e=>{if(e.submitter?.value==="cancel")return;e.preventDefault();try{await saveTranscript(el.transcriptInput.value.trim());el.transcriptDialog.close();toast("Transcripción guardada.","success")}catch(err){toast(err.message,"error")}};
 el.removeTranscript.onclick=async()=>{try{await saveTranscript("");el.transcriptDialog.close();toast("Transcripción eliminada.")}catch(e){toast(e.message,"error")}};
 el.addSound.onclick=()=>el.soundFile.click();
@@ -2223,7 +2182,27 @@ el.removeMusic.onclick=()=>{
   if(!state.result?.music_id)return toast("Esta locución no tiene música aplicada.","error");
   updateResultMusic(null);
 };
-el.speakerBoost.onclick=()=>{toggle(el.speakerBoost);savePreferences()};el.reset.onclick=()=>{state.profile="natural";applyProfile("natural",false);el.mode.value="auto";el.output.value="wav";savePreferences();toast("Valores restablecidos.")};
+el.speakerBoost.onclick=()=>{toggle(el.speakerBoost);savePreferences()};
+// Transcribir la referencia no mejora la fidelidad de forma medible (ICL y
+// huella de voz empatan emparejando por semilla), así que el modelo de ~250 MB
+// solo se descarga si se pide aquí.
+el.asrToggle.onclick=async()=>{
+  const activar=!el.asrToggle.classList.contains("on");
+  el.asrToggle.disabled=true;
+  try{
+    const r=await api("/api/asr",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled:activar})});
+    el.asrToggle.classList.toggle("on",r.enabled);el.asrToggle.setAttribute("aria-pressed",String(r.enabled));
+    toast(r.enabled?"Se transcribirán las referencias al prepararlas.":"Se clonará solo con la huella de voz.","success");
+  }catch(e){toast(e.message,"error");}finally{el.asrToggle.disabled=false;}
+};
+async function loadAsrState(){
+  try{
+    const r=await api("/api/asr");
+    el.asrToggle.classList.toggle("on",r.enabled);el.asrToggle.setAttribute("aria-pressed",String(r.enabled));
+  }catch{}
+}
+loadAsrState();
+el.reset.onclick=()=>{state.profile="natural";applyProfile("natural",false);el.mode.value="auto";el.output.value="wav";savePreferences();toast("Valores restablecidos.")};
 
 el.installEngineButton.onclick=installSelectedEngine;
 el.cancelEngineInstall.onclick=async()=>{

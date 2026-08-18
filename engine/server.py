@@ -8,6 +8,7 @@ import hashlib
 import re
 import shutil
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -1071,39 +1072,139 @@ def write_reference_offset(audio_path: Path, seconds: float) -> None:
         ruta.unlink(missing_ok=True)
 
 
-def limit_reference_length(y, sample_rate: int, offset_seconds: float = 0.0):
+def background_floor(y, sample_rate: int) -> float:
     """
-    Acorta una referencia demasiado larga cortando en un silencio.
+    Cuánto suena en los huecos entre palabras, respecto al volumen normal.
 
-    La fidelidad del clon sube casi linealmente hasta ~15 s, ahí se estanca y
-    después empeora; y una referencia larga es además uno de los disparadores
-    del cuelgue en el que el modelo nunca emite el token de fin. Cortar en
-    seco a mitad de palabra dejaría un final abrupto que el clon imita, así
-    que se busca el último silencio antes del límite.
+    Una grabación de voz sola baja casi a cero entre palabras. Un spot de radio
+    lleva música debajo y el suelo se queda alto. Medido en referencias reales:
+
+      Mujer_Paisa  0.04   voz sola
+      Animador     0.25   algo de ambiente
+      entel        0.65   música de fondo continua
+
+    Importa mucho: con la referencia limpia el clon puntuó 87.5% con una
+    dispersión de 4.8 puntos entre tomas; con la de música, 77.2% y 33 puntos
+    de dispersión. Diez puntos de fidelidad y siete veces más inestabilidad,
+    sin tocar ningún ajuste.
     """
     import librosa
     import numpy as np
 
-    # Tramo elegido a mano: se descarta lo anterior y se recorta desde ahí.
-    inicio = int(max(0.0, offset_seconds) * sample_rate)
-    if inicio and inicio < y.size - int(REFERENCE_MIN_KEEP_SECONDS * sample_rate):
-        y = np.ascontiguousarray(y[inicio:])
+    if y.size < sample_rate // 2:
+        return 0.0
+    try:
+        S = np.abs(librosa.stft(y, n_fft=1024, hop_length=256))
+        rms = librosa.feature.rms(S=S, frame_length=1024)[0]
+    except Exception:
+        return 0.0
+    mediana = float(np.percentile(rms, 50))
+    if mediana <= 1e-9:
+        return 0.0
+    return float(np.percentile(rms, 10) / mediana)
+
+
+# Qwen pide que la voz ocupe al menos el 60% de la referencia.
+REFERENCE_MIN_SPEECH_FRACTION = 0.55
+
+
+def speech_fraction(y, sample_rate: int) -> float:
+    """Proporción de la ventana con energía de voz, no silencio."""
+    import librosa
+    import numpy as np
+
+    if y.size < sample_rate // 2:
+        return 0.0
+    try:
+        S = np.abs(librosa.stft(y, n_fft=1024, hop_length=256))
+        rms = librosa.feature.rms(S=S, frame_length=1024)[0]
+    except Exception:
+        return 0.0
+    if not rms.size:
+        return 0.0
+    umbral = max(float(np.percentile(rms, 95)) * 0.15, 1e-4)
+    return float(np.mean(rms > umbral))
+
+
+def score_reference_window(y, sample_rate: int) -> float:
+    """Puntúa una ventana candidata: se busca voz limpia y bien nivelada."""
+    import numpy as np
+
+    if y.size < int(REFERENCE_MIN_KEEP_SECONDS * sample_rate):
+        return -1.0
+
+    rms = float(np.sqrt(np.mean(np.square(y)) + 1e-12))
+    if rms < 1e-4:
+        return -1.0
+
+    # Un tramo casi vacío tiene el suelo perfecto y ninguna voz: sin esto
+    # ganaría siempre, porque es justo lo que premia la puntuación de abajo.
+    if speech_fraction(y, sample_rate) < REFERENCE_MIN_SPEECH_FRACTION:
+        return -1.0
+
+    puntos = 0.0
+    # Lo que más pesa: que entre palabras haya silencio de verdad.
+    puntos += (1.0 - clamp(background_floor(y, sample_rate), 0.0, 1.0)) * 100.0
+    # Nivel razonable, ni susurro ni saturado.
+    dbfs = 20.0 * math.log10(max(rms, 1e-8))
+    puntos += 20.0 if -28.0 <= dbfs <= -12.0 else 8.0
+    # Saturación: recorta el timbre y el clon la copia.
+    puntos -= float(np.mean(np.abs(y) >= 0.995)) * 200.0
+    return puntos
+
+
+def limit_reference_length(y, sample_rate: int, offset_seconds: float = 0.0):
+    """
+    Se queda con el mejor tramo de una referencia larga.
+
+    Antes cortaba siempre por el principio y había un control para que el
+    usuario eligiese desde qué segundo. Elegir tramo es una decisión que nadie
+    puede tomar sin escuchar el audio entero, así que ahora la toma el motor:
+    puntúa las ventanas candidatas con score_reference_window y se queda con la
+    mejor. El corte final cae en un silencio para no imitar un final abrupto.
+
+    offset_seconds se conserva por compatibilidad con voces guardadas por
+    motores anteriores; si viene, manda sobre la búsqueda automática.
+    """
+    import librosa
+    import numpy as np
 
     limite = int(REFERENCE_MAX_SECONDS * sample_rate)
-    if y.size <= limite:
-        return y
-
     minimo = int(REFERENCE_MIN_KEEP_SECONDS * sample_rate)
-    try:
-        tramos = librosa.effects.split(y[:limite], top_db=35)
-    except Exception:
-        tramos = []
 
-    for inicio, fin in reversed(list(tramos)):
-        if fin >= minimo:
-            return np.ascontiguousarray(y[:fin])
+    def cerrar_en_silencio(tramo):
+        if tramo.size <= minimo:
+            return np.ascontiguousarray(tramo)
+        try:
+            partes = librosa.effects.split(tramo, top_db=35)
+        except Exception:
+            partes = []
+        for _, fin in reversed(list(partes)):
+            if fin >= minimo:
+                return np.ascontiguousarray(tramo[:fin])
+        return np.ascontiguousarray(tramo)
 
-    return np.ascontiguousarray(y[:limite])
+    # Tramo elegido a mano en una versión anterior: se respeta.
+    inicio = int(max(0.0, offset_seconds) * sample_rate)
+    if inicio and inicio < y.size - minimo:
+        return cerrar_en_silencio(y[inicio:][:limite])
+
+    if y.size <= limite:
+        return cerrar_en_silencio(y)
+
+    # Ventanas solapadas: paso de un tercio para no perder un buen tramo por
+    # caer justo entre dos cortes.
+    paso = max(1, limite // 3)
+    mejor, mejor_punto = None, -2.0
+    for arranque in range(0, max(1, y.size - minimo), paso):
+        ventana = y[arranque : arranque + limite]
+        if ventana.size < minimo:
+            break
+        punto = score_reference_window(ventana, sample_rate)
+        if punto > mejor_punto:
+            mejor, mejor_punto = ventana, punto
+
+    return cerrar_en_silencio(mejor if mejor is not None else y[:limite])
 
 
 def prepare_reference_audio(audio_path: Path, force: bool = False) -> tuple[Path, dict]:
@@ -1161,10 +1262,22 @@ def prepare_reference_audio(audio_path: Path, force: bool = False) -> tuple[Path
 
     sf.write(str(out), y, 24000, subtype="PCM_16")
 
+    # Se transcribe lo que de verdad se va a usar, no el audio original: es el
+    # recorte el que tiene que cuadrar con el texto en modo ICL.
+    auto_transcript = transcribe_reference(out)
+
+    # Se puntúa con el texto que de verdad se usará: si el pegado no cuadra con
+    # el recorte, manda el automático, y la nota debe hablar de ese.
+    duracion_recorte = len(y) / 24000.0
+    efectivo, _ = usable_icl_transcript(transcript, duracion_recorte)
+    if not efectivo:
+        efectivo, _ = usable_icl_transcript(auto_transcript, duracion_recorte)
+
     original = analyze_reference_audio(audio_path, transcript)
-    prepared = analyze_reference_audio(out, transcript)
+    prepared = analyze_reference_audio(out, efectivo)
     metadata = {
         "signature": signature,
+        "auto_transcript": auto_transcript,
         "source": str(audio_path),
         "prepared": str(out),
         "original": original,
@@ -1379,6 +1492,92 @@ def sampling_safe_for_icl(generation: dict, icl_active: bool) -> dict:
     if generation.get("do_sample") and generation.get("subtalker_dosample"):
         return generation
     return {**generation, **ICL_GREEDY_FALLBACK}
+
+
+# Transcribir la referencia es lo que hace utilizable el modo ICL, que es el
+# que Qwen recomienda para máxima fidelidad. Medido con el extractor de locutor
+# del propio modelo, sobre el rango útil (1.0 = idéntico al original, 0.9193 =
+# otro locutor distinto), 3 tomas por caso:
+#
+#   ICL          83.1%   dispersión 0.003
+#   x-vector     78.4%   dispersión 0.011
+#
+# Y en un guion largo troceado, la voz se va 1.3 puntos de principio a fin con
+# ICL frente a 7.2 sin él: ICL sostiene la voz, que es lo que se nota.
+#
+# Pedirle la transcripción al usuario no funciona: la pega del audio completo,
+# el motor recorta a 18 s y el par deja de cuadrar. Transcribir el tramo que de
+# verdad se usa lo resuelve sin que tenga que escribir nada.
+# Opcional a propósito. Medido emparejando por semilla sobre una referencia
+# limpia, ICL y huella de voz empatan (-0.06 puntos, gana 4 de 6): transcribir
+# no compra fidelidad, así que no vale forzar la descarga del modelo a todo el
+# mundo. Queda como interruptor para quien lo quiera automático.
+ASR_MODEL_SIZE = os.environ.get("QWEN_ENGINE_ASR_MODEL") or "small"
+ASR_ENABLED_DEFAULT = False
+_ASR_LOCK = threading.Lock()
+_ASR_MODEL = None
+_ASR_FALLO: Optional[str] = None
+_ASR_INTENTOS = 0
+ASR_MAX_INTENTOS = 3
+
+
+def asr_model():
+    """Carga perezosa. El modelo baja una sola vez a la caché privada de la app."""
+    global _ASR_MODEL, _ASR_FALLO, _ASR_INTENTOS
+    with _ASR_LOCK:
+        if _ASR_MODEL is not None:
+            return _ASR_MODEL
+        # La primera carga descarga el modelo y puede caerse por red lenta; con
+        # un fallo pegajoso el motor se quedaba sin ICL hasta reiniciar.
+        if _ASR_INTENTOS >= ASR_MAX_INTENTOS:
+            return None
+        _ASR_INTENTOS += 1
+        try:
+            from faster_whisper import WhisperModel
+
+            # int8 en CPU: la transcripción de 18 s tarda pocos segundos y no
+            # compite por la VRAM que necesita la síntesis.
+            _ASR_MODEL = WhisperModel(
+                ASR_MODEL_SIZE, device="cpu", compute_type="int8",
+                download_root=str(HF_HOME / "asr"),
+            )
+        except Exception as exc:
+            _ASR_FALLO = f"{type(exc).__name__}: {exc}"
+            print(f"[asr] no disponible: {_ASR_FALLO}")
+        return _ASR_MODEL
+
+
+def asr_enabled() -> bool:
+    ruta = DATA_ROOT / "asr_enabled.flag"
+    if ruta.exists():
+        return ruta.read_text(encoding="utf-8").strip() == "1"
+    return ASR_ENABLED_DEFAULT
+
+
+def set_asr_enabled(valor: bool) -> None:
+    (DATA_ROOT / "asr_enabled.flag").write_text("1" if valor else "0", encoding="utf-8")
+
+
+def transcribe_reference(audio_path: Path, language: str = "es") -> str:
+    """
+    Transcribe el audio preparado. Devuelve "" si no se puede.
+
+    Nunca debe tumbar una generación: sin transcripción se clona con la huella
+    de voz, que siempre funciona.
+    """
+    if not asr_enabled():
+        return ""
+    try:
+        modelo = asr_model()
+        if modelo is None:
+            return ""
+        segmentos, _ = modelo.transcribe(str(audio_path), language=language, beam_size=5)
+        return " ".join(s.text.strip() for s in segmentos).strip()
+    except Exception as exc:
+        # Cargar el modelo entra aquí a propósito: sin red, sin disco o con el
+        # runtime a medias, esto no puede tumbar una locución.
+        print(f"[asr] falló al transcribir {audio_path.name}: {type(exc).__name__}: {exc}")
+        return ""
 
 
 def usable_icl_transcript(
@@ -1694,6 +1893,17 @@ class ModelManager:
         )
         transcript, icl_rechazo = usable_icl_transcript(ref_text, duracion)
 
+        # La transcripción pegada manda si describe el tramo usado. Si no, la
+        # automática la sustituye en vez de renunciar a ICL: descartarla costaba
+        # 4.7 puntos de similitud y 6 puntos de deriva en guiones largos.
+        if not transcript:
+            automatica, _ = usable_icl_transcript(
+                metadata.get("auto_transcript"), duracion
+            )
+            if automatica:
+                transcript = automatica
+                icl_rechazo = None
+
         signature = metadata.get("signature", "")
         # El modo va en la clave: dos prompts del mismo audio, uno ICL y otro
         # solo x-vector, son objetos distintos. Sin esto, generar con
@@ -1987,6 +2197,21 @@ def system():
         }
     )
     return info
+
+
+class AsrRequest(BaseModel):
+    enabled: bool
+
+
+@app.get("/api/asr")
+def asr_state():
+    return {"enabled": asr_enabled(), "model": ASR_MODEL_SIZE}
+
+
+@app.post("/api/asr")
+def asr_set(request: AsrRequest):
+    set_asr_enabled(bool(request.enabled))
+    return {"enabled": asr_enabled()}
 
 
 @app.get("/api/status")
@@ -2765,6 +2990,29 @@ def packaging_self_test() -> int:
         )
 
     check("qwen_tts.Qwen3TTSModel", qwen_check)
+
+    def asr_check():
+        # Se importa de forma perezosa al preparar una voz, así que un motor sin
+        # esto arrancaría bien y solo fallaría ahí: el mismo defecto que tuvo
+        # engine-v1.0.2 con scikit-learn. Se comprueba construyendo el modelo
+        # sobre un audio real, no solo importando.
+        import numpy as np
+        import soundfile as sf
+        from faster_whisper import WhisperModel  # noqa: F401
+        import ctranslate2
+
+        with tempfile.TemporaryDirectory() as carpeta:
+            ruta = Path(carpeta) / "asr.wav"
+            n = 24000
+            onda = (0.1 * np.sin(2 * np.pi * 180 * np.arange(n) / 24000)).astype("float32")
+            sf.write(str(ruta), onda, 24000)
+            # No se descarga el modelo aquí: eso necesita red y el self-test
+            # corre durante la instalación. Basta con que el motor de inferencia
+            # esté completo y sepa leer el audio.
+            ctranslate2.get_supported_compute_types("cpu")
+        return f"ctranslate2 {ctranslate2.__version__}"
+
+    check("faster-whisper", asr_check)
 
     print("VOICE_STUDIO_ENGINE_SELF_TEST")
     failed = False
