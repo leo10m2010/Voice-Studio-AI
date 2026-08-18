@@ -1347,6 +1347,40 @@ ICL_RATIO_MIN = 0.55
 ICL_RATIO_MAX = 1.60
 
 
+# El muestreo voraz (do_sample=False) se desboca en ICL: el modelo deja de
+# emitir el token de fin y agota max_new_tokens. Medido en una RTX 4070 con un
+# guion que debería durar 7.8 s:
+#
+#   perfil fiel + x-vector ->  7.44 s   0.96x   correcto
+#   perfil fiel + ICL      -> 30.64 s   3.94x   inservible
+#   temperatura baja + ICL ->  8.16 s   1.05x   correcto
+#
+# El perfil "fiel" es justo el que elige quien busca máxima fidelidad, y con
+# transcripción es el peor caso posible. Bajar la temperatura conserva su
+# propósito —poca variación entre tomas— sin el desbocamiento: en similitud de
+# locutor mide 82.9%, empatado con el mejor caso (83.1%).
+ICL_GREEDY_FALLBACK = {
+    "do_sample": True,
+    "temperature": 0.70,
+    "top_p": 0.90,
+    "top_k": 40,
+    "subtalker_dosample": True,
+    "subtalker_temperature": 0.70,
+    "subtalker_top_p": 0.90,
+    "subtalker_top_k": 40,
+}
+
+
+def sampling_safe_for_icl(generation: dict, icl_active: bool) -> dict:
+    """Sustituye el muestreo voraz cuando hay transcripción. Ver
+    ICL_GREEDY_FALLBACK."""
+    if not icl_active:
+        return generation
+    if generation.get("do_sample") and generation.get("subtalker_dosample"):
+        return generation
+    return {**generation, **ICL_GREEDY_FALLBACK}
+
+
 def usable_icl_transcript(
     transcript: Optional[str], prepared_seconds: float
 ) -> tuple[str, Optional[str]]:
@@ -1775,6 +1809,9 @@ class ModelManager:
         )
         if icl_rechazo:
             print(f"[icl] transcripción descartada: {icl_rechazo}")
+
+        icl_activo = not icl_rechazo and bool(ref_text)
+        generation = sampling_safe_for_icl(generation, icl_activo)
 
         chunks = split_text_for_tts(text)
         outputs = []

@@ -544,5 +544,50 @@ class ReferenceScoreTest(unittest.TestCase):
         self.assertTrue(any("recorta" in n for n in mala["notes"]))
 
 
+class IclGreedyTest(unittest.TestCase):
+    """
+    El muestreo voraz se desboca en ICL. Medido en una RTX 4070, guion que
+    debería durar 7.8 s:
+
+      perfil fiel + x-vector ->  7.44 s   0.96x   correcto
+      perfil fiel + ICL      -> 30.64 s   3.94x   inservible
+      temperatura baja + ICL ->  8.16 s   1.05x   correcto
+
+    Es el peor caso posible: "fiel" es el perfil que elige quien busca máxima
+    fidelidad, y la transcripción es lo que recomienda Qwen para lo mismo.
+    """
+
+    def test_el_perfil_fiel_es_voraz(self):
+        # Si esto cambia, la sustitución de abajo deja de hacer falta.
+        fiel = server.qwen_sampling_from_friendly_controls(1.0, 0.0, "faithful")
+        self.assertFalse(fiel["do_sample"])
+        self.assertFalse(fiel["subtalker_dosample"])
+
+    def test_con_icl_se_sustituye_por_temperatura_baja(self):
+        fiel = server.qwen_sampling_from_friendly_controls(1.0, 0.0, "faithful")
+        seguro = server.sampling_safe_for_icl(fiel, icl_active=True)
+        self.assertTrue(seguro["do_sample"])
+        self.assertTrue(seguro["subtalker_dosample"])
+        self.assertLessEqual(seguro["temperature"], 0.75)
+
+    def test_sin_icl_el_perfil_fiel_se_respeta(self):
+        # Voraz + x-vector sí funciona (0.96x) y da tomas idénticas entre sí,
+        # que es justo lo que promete el perfil.
+        fiel = server.qwen_sampling_from_friendly_controls(1.0, 0.0, "faithful")
+        self.assertEqual(server.sampling_safe_for_icl(fiel, icl_active=False), fiel)
+
+    def test_un_perfil_que_ya_muestrea_no_se_toca(self):
+        natural = server.qwen_sampling_from_friendly_controls(0.5, 0.3, "natural")
+        self.assertEqual(server.sampling_safe_for_icl(natural, icl_active=True), natural)
+
+    def test_no_muta_el_diccionario_recibido(self):
+        # Cada trabajo en cola lleva su propia copia de los ajustes; mutarla
+        # aquí cambiaría los ajustes guardados en el historial.
+        fiel = server.qwen_sampling_from_friendly_controls(1.0, 0.0, "faithful")
+        copia = dict(fiel)
+        server.sampling_safe_for_icl(fiel, icl_active=True)
+        self.assertEqual(fiel, copia)
+
+
 if __name__ == "__main__":
     unittest.main()
