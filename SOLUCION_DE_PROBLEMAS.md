@@ -245,8 +245,9 @@ normalmente solo interesan las publicadas después.
 Los equipos la reciben al abrir la app, o al pulsar **Buscar voces nuevas** en
 la hoja de voces. Detalles que conviene saber:
 
-- **Nunca pisa una voz que ya tengas.** Si la editaste o le pusiste
-  transcripción, tu copia manda.
+- **Nunca pisa una voz ni una transcripción que ya tengas.** Si el audio
+  oficial ya estaba instalado pero aún no tenía texto, agrega únicamente la
+  transcripción publicada. Si la quitaste explícitamente, respeta tu decisión.
 - **Borrarla del catálogo no la borra** de los equipos que ya la tienen.
 - La transcripción viaja dentro del JSON, así que llega junto con el audio.
 - Se verifica el SHA-256 antes de dejarla en la biblioteca; una descarga

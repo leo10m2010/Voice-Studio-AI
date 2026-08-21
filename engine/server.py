@@ -217,6 +217,18 @@ def transcript_path(audio_path: Path) -> Path:
     return audio_path.with_suffix(audio_path.suffix + ".txt")
 
 
+def transcript_disabled_path(audio_path: Path) -> Path:
+    return audio_path.with_suffix(audio_path.suffix + ".txt.disabled")
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 # Catálogo remoto de voces. Mismo patrón que el motor: una Release fija cuyo
 # JSON se sobrescribe en cada publicación, para que una app antigua también vea
 # las voces nuevas. Sirve para repartir voces a todos los equipos sin sacar
@@ -239,13 +251,19 @@ def sync_remote_voices() -> dict:
     """
     Trae del catálogo las voces que aún no estén en la biblioteca.
 
-    Nunca pisa una voz existente: si la editaste o le pusiste transcripción, tu
-    copia manda. Sin red falla en silencio; esto corre en el arranque y no puede
-    retrasar ni romper nada.
+    Nunca pisa una voz ni una transcripción existente. Si el audio oficial ya
+    estaba instalado pero le faltaba el texto, completa solo ese sidecar. Sin
+    red falla en silencio; esto corre en el arranque y no puede retrasar ni
+    romper nada.
     """
     import requests
 
-    resultado = {"revisadas": 0, "descargadas": [], "error": None}
+    resultado = {
+        "revisadas": 0,
+        "descargadas": [],
+        "transcripciones": [],
+        "error": None,
+    }
     try:
         respuesta = requests.get(VOICE_CATALOG_URL, timeout=VOICE_CATALOG_TIMEOUT)
         if respuesta.status_code == 404:
@@ -277,6 +295,25 @@ def sync_remote_voices() -> dict:
 
         destino = VOICES_DIR / nombre
         if destino.exists():
+            texto = entrada.get("transcript")
+            sidecar = transcript_path(destino)
+            desactivada = transcript_disabled_path(destino)
+            if (
+                isinstance(texto, str)
+                and texto.strip()
+                and not sidecar.exists()
+                and not desactivada.exists()
+            ):
+                try:
+                    if file_sha256(destino) == esperado:
+                        sidecar.write_text(texto.strip(), encoding="utf-8")
+                        resultado["transcripciones"].append(nombre)
+                        print(f"[voces] transcripción agregada: {nombre}")
+                except OSError as exc:
+                    print(
+                        f"[voces] no se pudo agregar la transcripción de {nombre}: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
             continue
 
         try:
@@ -334,6 +371,18 @@ def copy_seed_assets() -> None:
                 continue
             target = VOICES_DIR / source.name
             if target.exists():
+                source_sidecar = transcript_path(source)
+                target_sidecar = transcript_path(target)
+                if (
+                    source_sidecar.exists()
+                    and not target_sidecar.exists()
+                    and not transcript_disabled_path(target).exists()
+                ):
+                    try:
+                        if file_sha256(source) == file_sha256(target):
+                            shutil.copy2(source_sidecar, target_sidecar)
+                    except OSError:
+                        pass
                 continue
             try:
                 shutil.copy2(source, target)
@@ -2434,12 +2483,15 @@ def voice_audio(voice_id: str):
 def update_voice_transcript(voice_id: str, request: TranscriptUpdate):
     path = find_audio(VOICES_DIR, voice_id)
     sidecar = transcript_path(path)
+    desactivada = transcript_disabled_path(path)
     text = request.transcript.strip()
 
     if text:
         sidecar.write_text(text, encoding="utf-8")
+        desactivada.unlink(missing_ok=True)
     else:
         sidecar.unlink(missing_ok=True)
+        desactivada.write_text("user_removed\n", encoding="utf-8")
 
     MODEL_MANAGER.invalidate_voice(voice_id)
     try:

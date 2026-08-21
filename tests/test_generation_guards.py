@@ -860,6 +860,52 @@ class CatalogoDeVocesTest(unittest.TestCase):
         self.assertEqual(destino.read_bytes(), b"lo mio")
         self.assertEqual(self.descargas, [])
 
+    def test_agrega_transcripcion_a_un_audio_oficial_ya_instalado(self):
+        destino = server.VOICES_DIR / "Nueva.mp3"
+        destino.write_bytes(b"audio")
+        digest = self._falso_requests({"voices": [self._entrada()]})
+        self._falso_requests({"voices": [self._entrada(sha256=digest)]})
+
+        r = server.sync_remote_voices()
+
+        self.assertEqual(r["descargadas"], [])
+        self.assertEqual(r["transcripciones"], ["Nueva.mp3"])
+        self.assertEqual(destino.read_bytes(), b"audio")
+        self.assertEqual(
+            server.transcript_path(destino).read_text(encoding="utf-8"),
+            "Hola.",
+        )
+        self.assertEqual(self.descargas, [])
+
+    def test_no_pisa_una_transcripcion_existente(self):
+        destino = server.VOICES_DIR / "Nueva.mp3"
+        destino.write_bytes(b"audio")
+        server.transcript_path(destino).write_text("Mi texto.", encoding="utf-8")
+        digest = self._falso_requests({"voices": [self._entrada()]})
+        self._falso_requests({"voices": [self._entrada(sha256=digest)]})
+
+        r = server.sync_remote_voices()
+
+        self.assertEqual(r["transcripciones"], [])
+        self.assertEqual(
+            server.transcript_path(destino).read_text(encoding="utf-8"),
+            "Mi texto.",
+        )
+
+    def test_respeta_una_transcripcion_quitada_por_el_usuario(self):
+        destino = server.VOICES_DIR / "Nueva.mp3"
+        destino.write_bytes(b"audio")
+        server.transcript_disabled_path(destino).write_text(
+            "user_removed\n", encoding="utf-8"
+        )
+        digest = self._falso_requests({"voices": [self._entrada()]})
+        self._falso_requests({"voices": [self._entrada(sha256=digest)]})
+
+        r = server.sync_remote_voices()
+
+        self.assertEqual(r["transcripciones"], [])
+        self.assertFalse(server.transcript_path(destino).exists())
+
     def test_rechaza_nombres_que_se_salen_de_la_carpeta(self):
         for nombre in ("../fuera.mp3", "sub/dir.mp3", "..\fuera.mp3"):
             with self.subTest(nombre=nombre):

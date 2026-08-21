@@ -2208,9 +2208,13 @@ el.syncVoices.onclick=async()=>{
   el.syncVoices.disabled=true;
   try{
     const r=await api("/api/voices/sync",{method:"POST",signal:AbortSignal.timeout(120000)});
-    if(r.descargadas?.length){
+    const nuevas=r.descargadas?.length||0,transcripciones=r.transcripciones?.length||0;
+    if(nuevas||transcripciones){
       await refreshData();
-      toast(`${r.descargadas.length} voz(ces) nueva(s): ${r.descargadas.join(", ")}`,"success");
+      const partes=[];
+      if(nuevas)partes.push(`${nuevas} voz(ces) nueva(s)`);
+      if(transcripciones)partes.push(`${transcripciones} transcripción(es) agregada(s)`);
+      toast(partes.join(" · "),"success");
     }else if(r.error){
       toast("No se pudo consultar el catálogo. ¿Hay conexión?","error");
     }else{
