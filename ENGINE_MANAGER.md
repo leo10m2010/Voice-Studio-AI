@@ -57,7 +57,7 @@ Puede sobrescribirse en desarrollo con:
 Actions → `03 - Publicar motores CPU y NVIDIA`
 
 Ese workflow:
-1. crea/usa Release `engine-v1.0.6`;
+1. crea/usa Release `engine-v1.0.8`;
 2. construye CPU y NVIDIA por separado;
 3. divide cada runtime en ZIPs pequeños;
 4. sube las partes;

@@ -478,6 +478,14 @@ class LibraryWarmUp:
         except Exception as exc:
             print(f"[warm-up] no se pudieron copiar los recursos incluidos: {exc}")
 
+        # Si quedó activado, el modelo se prepara aquí y no dentro de la
+        # primera voz que alguien intente preparar.
+        if asr_enabled():
+            try:
+                asr_start_download()
+            except Exception as exc:
+                print(f"[asr] no se pudo arrancar la preparación: {exc}")
+
         # Voces publicadas después del instalador. Va aquí, con el puerto ya
         # abierto, y falla en silencio sin red: no puede retrasar el arranque.
         try:
@@ -1678,37 +1686,68 @@ def sampling_safe_for_icl(generation: dict, icl_active: bool) -> dict:
 # mundo. Queda como interruptor para quien lo quiera automático.
 ASR_MODEL_SIZE = os.environ.get("QWEN_ENGINE_ASR_MODEL") or "small"
 ASR_ENABLED_DEFAULT = False
+
+# Activar el interruptor no hacía nada visible: el modelo se descargaba en
+# silencio la primera vez que se preparaba una voz, y si tardaba, esa voz se
+# quedaba sin transcripción sin avisar. Ahora la descarga la dispara el
+# interruptor y tiene estado consultable, y preparar una voz nunca espera a
+# una descarga.
+ASR_ESTADO_APAGADO = "apagado"
+ASR_ESTADO_FALTA = "sin_descargar"
+ASR_ESTADO_BAJANDO = "descargando"
+ASR_ESTADO_LISTO = "listo"
+ASR_ESTADO_ERROR = "error"
+
 _ASR_LOCK = threading.Lock()
 _ASR_MODEL = None
-_ASR_FALLO: Optional[str] = None
-_ASR_INTENTOS = 0
-ASR_MAX_INTENTOS = 3
+_ASR_DETALLE: Optional[str] = None
+_ASR_BAJANDO = False
 
 
-def asr_model():
-    """Carga perezosa. El modelo baja una sola vez a la caché privada de la app."""
-    global _ASR_MODEL, _ASR_FALLO, _ASR_INTENTOS
-    with _ASR_LOCK:
-        if _ASR_MODEL is not None:
-            return _ASR_MODEL
-        # La primera carga descarga el modelo y puede caerse por red lenta; con
-        # un fallo pegajoso el motor se quedaba sin ICL hasta reiniciar.
-        if _ASR_INTENTOS >= ASR_MAX_INTENTOS:
-            return None
-        _ASR_INTENTOS += 1
+def asr_dir() -> Path:
+    return HF_HOME / "asr"
+
+
+def asr_repo_id() -> str:
+    """Repositorio del que faster-whisper baja el tamaño elegido."""
+    try:
+        from faster_whisper.utils import _MODELS
+
+        return _MODELS.get(ASR_MODEL_SIZE) or f"Systran/faster-whisper-{ASR_MODEL_SIZE}"
+    except Exception:
+        return f"Systran/faster-whisper-{ASR_MODEL_SIZE}"
+
+
+def asr_downloaded_bytes() -> int:
+    carpeta = asr_dir()
+    if not carpeta.exists():
+        return 0
+    # Se cuentan también los .incomplete: es donde huggingface_hub va
+    # escribiendo mientras baja. Sin ellos la cifra se quedaba clavada en los
+    # pocos MB de los archivos pequeños y saltaba de golpe al final.
+    total = 0
+    for ruta in carpeta.rglob("*"):
         try:
-            from faster_whisper import WhisperModel
+            if ruta.is_file():
+                total += ruta.stat().st_size
+        except OSError:
+            continue
+    return total
 
-            # int8 en CPU: la transcripción de 18 s tarda pocos segundos y no
-            # compite por la VRAM que necesita la síntesis.
-            _ASR_MODEL = WhisperModel(
-                ASR_MODEL_SIZE, device="cpu", compute_type="int8",
-                download_root=str(HF_HOME / "asr"),
-            )
-        except Exception as exc:
-            _ASR_FALLO = f"{type(exc).__name__}: {exc}"
-            print(f"[asr] no disponible: {_ASR_FALLO}")
-        return _ASR_MODEL
+
+def asr_is_downloaded() -> bool:
+    # El modelo de faster-whisper son varios archivos; el grande es model.bin,
+    # que huggingface_hub deja en snapshots/<hash>/ solo cuando terminó.
+    carpeta = asr_dir()
+    if not carpeta.exists():
+        return False
+    for ruta in carpeta.rglob("model.bin"):
+        try:
+            if ruta.is_file() and ruta.stat().st_size > 0:
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def asr_enabled() -> bool:
@@ -1720,6 +1759,110 @@ def asr_enabled() -> bool:
 
 def set_asr_enabled(valor: bool) -> None:
     (DATA_ROOT / "asr_enabled.flag").write_text("1" if valor else "0", encoding="utf-8")
+
+
+def asr_status() -> dict:
+    with _ASR_LOCK:
+        bajando = _ASR_BAJANDO
+        cargado = _ASR_MODEL is not None
+        detalle = _ASR_DETALLE
+
+    if not asr_enabled():
+        estado = ASR_ESTADO_APAGADO
+    elif bajando:
+        estado = ASR_ESTADO_BAJANDO
+    elif cargado or asr_is_downloaded():
+        estado = ASR_ESTADO_LISTO
+    elif detalle:
+        estado = ASR_ESTADO_ERROR
+    else:
+        estado = ASR_ESTADO_FALTA
+
+    return {
+        "enabled": asr_enabled(),
+        "model": ASR_MODEL_SIZE,
+        "estado": estado,
+        "detalle": detalle,
+        "mb_descargados": round(asr_downloaded_bytes() / (1024 * 1024), 1),
+    }
+
+
+def _asr_download_worker() -> None:
+    global _ASR_MODEL, _ASR_DETALLE, _ASR_BAJANDO
+    try:
+        from faster_whisper import WhisperModel
+
+        # int8 en CPU: transcribir 18 s tarda pocos segundos y no compite por
+        # la VRAM que necesita la síntesis. Construir el modelo es lo que
+        # dispara la descarga.
+        modelo = WhisperModel(
+            ASR_MODEL_SIZE,
+            device="cpu",
+            compute_type="int8",
+            download_root=str(asr_dir()),
+        )
+        with _ASR_LOCK:
+            _ASR_MODEL = modelo
+            _ASR_DETALLE = None
+        print(f"[asr] modelo {ASR_MODEL_SIZE} listo")
+    except Exception as exc:
+        with _ASR_LOCK:
+            _ASR_DETALLE = f"{type(exc).__name__}: {exc}"
+        print(f"[asr] no se pudo preparar el modelo: {type(exc).__name__}: {exc}")
+    finally:
+        with _ASR_LOCK:
+            _ASR_BAJANDO = False
+
+
+def asr_start_download() -> dict:
+    """
+    Arranca la descarga si hace falta. No bloquea.
+
+    asr_status() toma _ASR_LOCK, así que NUNCA debe llamarse teniéndolo: es un
+    Lock normal, no reentrante, y hacerlo colgaba el motor entero —el hilo se
+    quedaba esperando un cerrojo que él mismo tenía, con uvicorn detrás.
+    """
+    global _ASR_BAJANDO, _ASR_DETALLE
+    arrancar = False
+    with _ASR_LOCK:
+        if _ASR_MODEL is None and not _ASR_BAJANDO:
+            _ASR_BAJANDO = True
+            _ASR_DETALLE = None
+            arrancar = True
+
+    if arrancar:
+        threading.Thread(
+            target=_asr_download_worker, name="asr-download", daemon=True
+        ).start()
+    return asr_status()
+
+
+def asr_model():
+    """
+    El modelo ya cargado, o None.
+
+    Nunca descarga aquí: la descarga la dispara el interruptor. Antes, la
+    primera voz que se preparaba se comía la espera entera y se quedaba sin
+    transcripción si no daba tiempo.
+    """
+    global _ASR_BAJANDO
+    with _ASR_LOCK:
+        if _ASR_MODEL is not None:
+            return _ASR_MODEL
+        if _ASR_BAJANDO or _ASR_DETALLE:
+            # Descarga en curso, o falló: esta preparación se salta la
+            # transcripción en vez de esperar.
+            return None
+        if not asr_is_downloaded():
+            # No está en disco: bajarlo es cosa del interruptor, no de una
+            # generación que el usuario está esperando.
+            return None
+        _ASR_BAJANDO = True
+
+    # Ya está en disco: cargarlo no toca la red y tarda unos segundos.
+    _asr_download_worker()
+    with _ASR_LOCK:
+        return _ASR_MODEL
 
 
 def transcribe_reference(audio_path: Path, language: str = "es") -> str:
@@ -2378,13 +2521,22 @@ def voices_sync():
 
 @app.get("/api/asr")
 def asr_state():
-    return {"enabled": asr_enabled(), "model": ASR_MODEL_SIZE}
+    return asr_status()
 
 
 @app.post("/api/asr")
 def asr_set(request: AsrRequest):
+    """
+    Activar dispara la descarga del modelo y responde al instante.
+
+    Antes solo escribía la bandera: el usuario le daba a activar, no pasaba
+    nada visible, y el modelo se bajaba en silencio dentro de la primera voz
+    que se preparase.
+    """
     set_asr_enabled(bool(request.enabled))
-    return {"enabled": asr_enabled()}
+    if request.enabled:
+        return asr_start_download()
+    return asr_status()
 
 
 @app.get("/api/status")

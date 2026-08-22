@@ -1015,5 +1015,128 @@ class BorrarUnaLocucionTest(unittest.TestCase):
         self.assertEqual(len(server.load_history()), 1)
 
 
+class AsrDescargaTest(unittest.TestCase):
+    """
+    Activar el interruptor no hacía nada visible: el modelo se bajaba en
+    silencio dentro de la primera voz que se preparase, y si tardaba, esa voz
+    se quedaba sin transcripción sin avisar. Ahora la descarga la dispara el
+    interruptor, tiene estado consultable, y preparar una voz nunca espera.
+    """
+
+    def setUp(self):
+        self.bandera = server.DATA_ROOT / "asr_enabled.flag"
+        self.previo = self.bandera.read_text(encoding="utf-8") if self.bandera.exists() else None
+        self.addCleanup(self._restaurar)
+
+        for nombre in ("_ASR_MODEL", "_ASR_DETALLE", "_ASR_BAJANDO"):
+            self.addCleanup(setattr, server, nombre, getattr(server, nombre))
+        server._ASR_MODEL = None
+        server._ASR_DETALLE = None
+        server._ASR_BAJANDO = False
+
+        original = server.asr_is_downloaded
+        self.addCleanup(setattr, server, "asr_is_downloaded", original)
+        server.asr_is_downloaded = lambda: False
+
+    def _restaurar(self):
+        if self.previo is None:
+            self.bandera.unlink(missing_ok=True)
+        else:
+            self.bandera.write_text(self.previo, encoding="utf-8")
+
+    def test_apagado_informa_apagado(self):
+        server.set_asr_enabled(False)
+        self.assertEqual(server.asr_status()["estado"], server.ASR_ESTADO_APAGADO)
+
+    def test_encendido_sin_modelo_dice_que_falta(self):
+        server.set_asr_enabled(True)
+        self.assertEqual(server.asr_status()["estado"], server.ASR_ESTADO_FALTA)
+
+    def test_mientras_baja_lo_dice(self):
+        server.set_asr_enabled(True)
+        server._ASR_BAJANDO = True
+        self.assertEqual(server.asr_status()["estado"], server.ASR_ESTADO_BAJANDO)
+
+    def test_con_el_modelo_en_disco_esta_listo(self):
+        server.set_asr_enabled(True)
+        server.asr_is_downloaded = lambda: True
+        self.assertEqual(server.asr_status()["estado"], server.ASR_ESTADO_LISTO)
+
+    def test_un_fallo_se_reporta(self):
+        server.set_asr_enabled(True)
+        server._ASR_DETALLE = "OSError: sin red"
+        estado = server.asr_status()
+        self.assertEqual(estado["estado"], server.ASR_ESTADO_ERROR)
+        self.assertIn("sin red", estado["detalle"])
+
+    def test_preparar_una_voz_no_espera_a_la_descarga(self):
+        # Es el fallo que se arregla: la primera voz se comía la espera entera.
+        server.set_asr_enabled(True)
+        server._ASR_BAJANDO = True
+        self.assertIsNone(server.asr_model())
+
+    def test_sin_modelo_en_disco_no_descarga_desde_una_generacion(self):
+        # Bajar 480 MB es cosa del interruptor, no de un usuario esperando audio.
+        server.set_asr_enabled(True)
+        self.assertIsNone(server.asr_model())
+
+    def test_el_progreso_cuenta_las_descargas_a_medias(self):
+        # huggingface_hub escribe en .incomplete mientras baja; sin contarlos la
+        # cifra se quedaba clavada y saltaba de golpe al final.
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as carpeta:
+            raiz = Path(carpeta)
+            original = server.asr_dir
+            self.addCleanup(setattr, server, "asr_dir", original)
+            server.asr_dir = lambda: raiz
+
+            (raiz / "blobs").mkdir()
+            (raiz / "blobs" / "abc.incomplete").write_bytes(b"x" * 5000)
+            self.assertGreater(server.asr_downloaded_bytes(), 4000)
+
+    def test_activar_dos_veces_no_cuelga_el_motor(self):
+        # asr_status() toma _ASR_LOCK. Llamarla teniendo el cerrojo colgaba el
+        # motor entero: un Lock normal no es reentrante y el hilo se quedaba
+        # esperándose a sí mismo, con uvicorn detrás.
+        import threading as _th
+
+        server.set_asr_enabled(True)
+        resultado = {}
+
+        def intentar():
+            server.asr_start_download()   # primera: reserva la descarga
+            server.asr_start_download()   # segunda: ya reservada, antes colgaba
+            resultado["ok"] = True
+
+        hilo = _th.Thread(target=intentar, daemon=True)
+        hilo.start()
+        hilo.join(timeout=10)
+        self.assertTrue(resultado.get("ok"), "asr_start_download se quedó colgada")
+
+    def test_consultar_el_estado_mientras_baja_no_cuelga(self):
+        import threading as _th
+
+        server.set_asr_enabled(True)
+        server._ASR_BAJANDO = True
+        resultado = {}
+
+        def intentar():
+            server.asr_status()
+            server.asr_start_download()
+            resultado["estado"] = server.asr_status()["estado"]
+
+        hilo = _th.Thread(target=intentar, daemon=True)
+        hilo.start()
+        hilo.join(timeout=10)
+        self.assertEqual(resultado.get("estado"), server.ASR_ESTADO_BAJANDO)
+
+    def test_apagar_no_deja_estado_de_descarga(self):
+        server.set_asr_enabled(True)
+        server.set_asr_enabled(False)
+        self.assertFalse(server.asr_status()["enabled"])
+        self.assertEqual(server.asr_status()["estado"], server.ASR_ESTADO_APAGADO)
+
+
 if __name__ == "__main__":
     unittest.main()

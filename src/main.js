@@ -2,7 +2,7 @@ import "./styles.css";
 
 const API = "http://127.0.0.1:8765";
 const DEFAULT_MODEL_ID = "Qwen/Qwen3-TTS-12Hz-0.6B-Base";
-const REQUIRED_ENGINE_VERSION = "1.0.6";
+const REQUIRED_ENGINE_VERSION = "1.0.8";
 
 const icons = {
   wave: `<svg viewBox="0 0 24 24"><path d="M4 13v-2M8 17V7M12 20V4M16 16V8M20 13v-2"/></svg>`,
@@ -374,7 +374,7 @@ document.querySelector("#app").innerHTML = `
             </div>
 
             <div class="toggle-row">
-              <div><label>Transcribir referencias</label><small id="asrNote">Descarga un modelo de ~250 MB la primera vez</small></div>
+              <div><label>Transcribir referencias</label><small id="asrNote">Descarga un modelo de ~464 MB la primera vez</small></div>
               <button class="toggle pressable" id="asrToggle" aria-pressed="false"><span></span></button>
             </div>
 
@@ -1540,7 +1540,15 @@ function switchTab(tab){
 async function saveTranscript(text){
   if(!state.voice)return;await api(`/api/voices/${encodeURIComponent(state.voice.id)}/transcript`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({transcript:text})});await refreshData();state.voice=state.voices.find(v=>v.id===state.voice?.id)||state.voice;updateVoiceUI()
 }
-function openTranscript(){if(!state.voice)return toast("Primero selecciona una voz.");el.transcriptInput.value=state.voice.transcript||"";el.transcriptDialog.showModal();setTimeout(()=>el.transcriptInput.focus(),60)}
+function openTranscript(){
+  if(!state.voice)return toast("Primero selecciona una voz.");
+  el.transcriptInput.value=state.voice.transcript||"";
+  // Sin transcripción no hay nada que quitar, y pulsarlo marcaba la voz como
+  // "el usuario no la quiere", bloqueando la oficial del catálogo para siempre.
+  el.removeTranscript.hidden=!state.voice.transcript;
+  el.transcriptDialog.showModal();
+  setTimeout(()=>el.transcriptInput.focus(),60);
+}
 function fileDuration(file){return new Promise(resolve=>{const a=document.createElement("audio"),u=URL.createObjectURL(file);a.preload="metadata";a.onloadedmetadata=()=>{const d=a.duration;URL.revokeObjectURL(u);resolve(Number.isFinite(d)?d:null)};a.onerror=()=>{URL.revokeObjectURL(u);resolve(null)};a.src=u})}
 async function prepareImport(file){
   state.pendingVoiceFile=file;const d=await fileDuration(file),note=d==null?"No se pudo leer duración":d<3?"Muy corto para Qwen":d<8?"Válido; con 10–15 s el clon sale mejor":d<=15?"Rango óptimo":d<=18?"Bien; el óptimo está en 10–15 s":"Se recortará a 18 s en el silencio más cercano";
@@ -2231,14 +2239,45 @@ el.asrToggle.onclick=async()=>{
   el.asrToggle.disabled=true;
   try{
     const r=await api("/api/asr",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled:activar})});
-    el.asrToggle.classList.toggle("on",r.enabled);el.asrToggle.setAttribute("aria-pressed",String(r.enabled));
-    toast(r.enabled?"Se transcribirán las referencias al prepararlas.":"Se clonará solo con la huella de voz.","success");
+    pintarAsr(r);
+    if(r.enabled)vigilarAsr();
   }catch(e){toast(e.message,"error");}finally{el.asrToggle.disabled=false;}
 };
+// Activar dispara una descarga de varios cientos de MB. Sin esto el
+// interruptor se quedaba mudo y no había forma de saber si estaba pasando algo.
+function pintarAsr(r){
+  if(!r)return;
+  el.asrToggle.classList.toggle("on",!!r.enabled);
+  el.asrToggle.setAttribute("aria-pressed",String(!!r.enabled));
+  const mb=r.mb_descargados?`${r.mb_descargados} MB`:"";
+  const textos={
+    apagado:"Descarga un modelo de ~464 MB la primera vez",
+    sin_descargar:"Se descargará al activarlo",
+    descargando:`Descargando el modelo… ${mb}`,
+    listo:"Modelo listo · se transcribirán las referencias al prepararlas",
+    error:`No se pudo preparar: ${r.detalle||"error desconocido"}`
+  };
+  el.asrNote.textContent=textos[r.estado]||textos.apagado;
+}
+function vigilarAsr(){
+  clearInterval(vigilarAsr.t);
+  vigilarAsr.t=setInterval(async()=>{
+    try{
+      const r=await api("/api/asr");
+      pintarAsr(r);
+      if(r.estado!=="descargando"){
+        clearInterval(vigilarAsr.t);
+        if(r.estado==="listo")toast("Modelo de transcripción listo.","success");
+        if(r.estado==="error")toast(`No se pudo preparar la transcripción: ${r.detalle||""}`,"error");
+      }
+    }catch{clearInterval(vigilarAsr.t);}
+  },1500);
+}
 async function loadAsrState(){
   try{
     const r=await api("/api/asr");
-    el.asrToggle.classList.toggle("on",r.enabled);el.asrToggle.setAttribute("aria-pressed",String(r.enabled));
+    pintarAsr(r);
+    if(r.estado==="descargando")vigilarAsr();
   }catch{}
 }
 loadAsrState();
