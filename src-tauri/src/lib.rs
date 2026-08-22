@@ -774,6 +774,26 @@ fn run_runtime_self_test(executable: &Path) -> Result<(), String> {
     ))
 }
 
+/// Renombra reintentando: en Windows, matar el proceso no libera los handles
+/// al instante, y un antivirus o el indexador pueden retener la carpeta unos
+/// cientos de milisegundos más. Sin reintentos, activar el motor nuevo fallaba
+/// con "Acceso denegado (os error 5)".
+fn rename_with_retry(from: &Path, to: &Path) -> std::io::Result<()> {
+    let mut last = None;
+    for attempt in 0..10u64 {
+        match fs::rename(from, to) {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                last = Some(error);
+                std::thread::sleep(Duration::from_millis(150 * (attempt + 1)));
+            }
+        }
+    }
+    Err(last.unwrap_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::Other, "renombrado imposible")
+    }))
+}
+
 fn install_engine_blocking(
     app: AppHandle,
     flavor: String,
@@ -932,11 +952,32 @@ fn install_engine_blocking(
     if backup.exists() {
         let _ = fs::remove_dir_all(&backup);
     }
+
+    // El motor tiene abiertos sus propios archivos dentro de runtime/, y
+    // Windows no deja renombrar una carpeta en uso: sin esto, activar el motor
+    // nuevo moría con "Acceso denegado (os error 5)" en cualquier equipo donde
+    // el anterior estuviese funcionando.
+    //
+    // Se para aquí y no al empezar: así sigue disponible durante toda la
+    // descarga —que son ~2.8 GB en NVIDIA— y solo queda fuera los segundos que
+    // dura el cambio de carpeta.
     if runtime.exists() {
-        fs::rename(&runtime, &backup).map_err(|error| error.to_string())?;
+        let process = app.state::<EngineProcess>();
+        let expected_stop = app.state::<EngineExpectedStop>();
+        if let Err(error) = terminate_engine(process.inner(), expected_stop.inner()) {
+            println!("[engine] no se pudo detener antes de activar: {error}");
+        }
     }
 
-    if let Err(error) = fs::rename(&staging, &runtime) {
+    if runtime.exists() {
+        rename_with_retry(&runtime, &backup).map_err(|error| {
+            format!(
+                "No se pudo apartar el motor anterior: {error}. Suele ser que siga en uso: cierra Voice Studio AI por completo y vuelve a intentarlo, o revisa si el antivirus está reteniendo la carpeta."
+            )
+        })?;
+    }
+
+    if let Err(error) = rename_with_retry(&staging, &runtime) {
         if backup.exists() && !runtime.exists() {
             let _ = fs::rename(&backup, &runtime);
         }

@@ -1835,6 +1835,19 @@ async function installSelectedEngine(){
     const status=await tauriInvoke("install_engine",{flavor});
     state.engine.status=status;
     updateEngineMini();
+    // Instalar detiene el motor: Windows no deja reemplazar su carpeta en uso.
+    // Hay que volver a arrancarlo aquí, porque si esto vino de
+    // "Reparar / actualizar" el espacio de trabajo ya estaba abierto y
+    // launchWorkspace() sale por su guarda sin arrancar nada.
+    handleEngineProgress({stage:"testing",percent:99,downloaded_bytes:pack.download_bytes||0,total_bytes:pack.download_bytes||0,message:"Iniciando el motor nuevo…"});
+    try{
+      await startTauriEngine();
+      await waitEngine({timeoutMs:120000});
+      state.engine.status=await refreshEngineStatus()||state.engine.status;
+      await refreshData();
+    }catch(e){
+      toast("El motor se instaló, pero no arrancó solo. Reinicia la app.","error");
+    }
     handleEngineProgress({stage:"done",percent:100,downloaded_bytes:pack.download_bytes||0,total_bytes:pack.download_bytes||0,message:"Motor instalado y verificado."});
     el.setupDoneMeta.textContent=`${pack.label} ${pack.version} · ${humanBytes(status.installed_bytes)} instalados.`;
     engineViews("engineDoneView");
