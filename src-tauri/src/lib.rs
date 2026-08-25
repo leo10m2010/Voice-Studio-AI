@@ -1159,6 +1159,24 @@ async fn check_app_update() -> Result<Option<AppUpdate>, String> {
     }))
 }
 
+/// Solo assets de las Releases de este repositorio.
+///
+/// La URL llega del frontend y acaba en un ejecutable que se lanza, así que
+/// esto no es cosmética: cualquier otro origen se rechaza.
+fn installer_url_is_allowed(url: &str) -> bool {
+    let permitido = format!("https://github.com/{GITHUB_REPO}/releases/download/");
+    url.starts_with(&permitido) && !url.contains("..")
+}
+
+/// Solo el instalador de Windows, y como nombre suelto: nada de rutas.
+fn installer_name_is_allowed(name: &str) -> bool {
+    let limpio = match Path::new(name).file_name().and_then(|v| v.to_str()) {
+        Some(value) => value,
+        None => return false,
+    };
+    limpio == name && limpio.to_ascii_lowercase().ends_with("-setup.exe")
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct AppUpdateProgress {
     downloaded_bytes: u64,
@@ -1185,19 +1203,13 @@ fn app_update_dir(app: &AppHandle) -> Result<PathBuf, String> {
 async fn download_app_update(app: AppHandle, url: String, filename: String) -> Result<String, String> {
     // La URL llega del frontend y acaba en un ejecutable, así que se exige que
     // sea un asset de las Releases de este repositorio y nada más.
-    let permitido = format!("https://github.com/{GITHUB_REPO}/releases/download/");
-    if !url.starts_with(&permitido) {
+    if !installer_url_is_allowed(&url) {
         return Err("Ese instalador no viene de las versiones oficiales.".into());
     }
-
-    let limpio = Path::new(&filename)
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or("")
-        .to_string();
-    if !limpio.to_ascii_lowercase().ends_with("-setup.exe") {
+    if !installer_name_is_allowed(&filename) {
         return Err("Solo se descarga el instalador de Windows.".into());
     }
+    let limpio = filename.clone();
 
     let carpeta = app_update_dir(&app)?;
     let destino = carpeta.join(&limpio);
@@ -1302,7 +1314,7 @@ fn run_app_installer(app: AppHandle, path: String) -> Result<(), String> {
     if !ruta
         .file_name()
         .and_then(|v| v.to_str())
-        .map(|v| v.to_ascii_lowercase().ends_with("-setup.exe"))
+        .map(installer_name_is_allowed)
         .unwrap_or(false)
     {
         return Err("Ese archivo no es el instalador.".into());
@@ -1531,6 +1543,41 @@ async fn install_engine(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn acepta_el_instalador_real_de_la_ultima_release() {
+        // Nombre y URL tal como los publica el workflow 02.
+        assert!(installer_name_is_allowed("Voice.Studio.AI_0.8.5_x64-setup.exe"));
+        assert!(installer_url_is_allowed(
+            "https://github.com/leo10m2010/Voice-Studio-AI/releases/download/v0.8.5/Voice.Studio.AI_0.8.5_x64-setup.exe"
+        ));
+    }
+
+    #[test]
+    fn rechaza_urls_de_fuera() {
+        for url in [
+            "https://ejemplo.com/malo-setup.exe",
+            "http://github.com/leo10m2010/Voice-Studio-AI/releases/download/v1/a-setup.exe",
+            "https://github.com/otro/repo/releases/download/v1/a-setup.exe",
+            "https://github.com/leo10m2010/Voice-Studio-AI/releases/download/../../a-setup.exe",
+        ] {
+            assert!(!installer_url_is_allowed(url), "aceptó {url}");
+        }
+    }
+
+    #[test]
+    fn rechaza_nombres_que_no_son_el_instalador() {
+        for nombre in [
+            "cualquiera.exe",
+            "notas.txt",
+            "../fuera-setup.exe",
+            "sub/dir-setup.exe",
+            "sub\dir-setup.exe",
+            "",
+        ] {
+            assert!(!installer_name_is_allowed(nombre), "aceptó {nombre}");
+        }
+    }
 
     fn valid_manifest() -> EngineManifest {
         EngineManifest {
