@@ -1572,7 +1572,7 @@ mod tests {
             "notas.txt",
             "../fuera-setup.exe",
             "sub/dir-setup.exe",
-            "sub\dir-setup.exe",
+            r"sub\dir-setup.exe",
             "",
         ] {
             assert!(!installer_name_is_allowed(nombre), "aceptó {nombre}");
