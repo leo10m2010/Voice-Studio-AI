@@ -68,5 +68,60 @@ class AudioMixTests(unittest.TestCase):
         self.assertTrue(np.isfinite(mixed).all())
 
 
+class NivelDeMusicaTest(unittest.TestCase):
+    """
+    La música se normaliza a -18 dBFS y luego se multiplica por el volumen, así
+    que el control tiene que traducirse en un cambio audible. Al 18% quedaba
+    17.5 dB por debajo de la voz —prácticamente inaudible, de ahí el "la música
+    no hace nada"— y al 45% queda a 6.5 dB, que ya es una cama de radio.
+    """
+
+    def _mezclar(self, volumen):
+        """Energía de la mezcla en la frecuencia de la música.
+
+        Restar la voz no sirve como medida: el limitador suave del final toca
+        también la voz, así que a volumen 0 ya aparecía un residuo. Mirando solo
+        los 900 Hz de la música se aísla lo que aporta de verdad.
+        """
+        sr = 24000
+        t = np.arange(sr * 2) / sr
+        voz = (0.18 * np.sin(2 * np.pi * 200 * t)).astype(np.float32)
+        musica = (0.5 * np.sin(2 * np.pi * 900 * t)).astype(np.float32)
+
+        with tempfile.TemporaryDirectory() as td:
+            ruta = Path(td) / "music.wav"
+            sf.write(ruta, musica, sr)
+            mezclado = mix_voice_with_music(
+                voice_wav=voz, sample_rate=sr, music_path=ruta, music_volume=volumen
+            )
+
+        mono = mezclado.mean(axis=1)
+        espectro = np.abs(np.fft.rfft(mono * np.hanning(len(mono))))
+        frecuencias = np.fft.rfftfreq(len(mono), 1 / sr)
+        banda = (frecuencias > 850) & (frecuencias < 950)
+        return float(np.max(espectro[banda]))
+
+    def test_mas_volumen_es_mas_musica(self):
+        bajo = self._mezclar(0.18)
+        alto = self._mezclar(0.45)
+        self.assertGreater(alto, bajo * 2.0)
+
+    def test_el_rango_que_ofrece_la_interfaz_se_nota(self):
+        # El deslizador va de 5 a 60; los extremos deben sonar muy distintos.
+        minimo = self._mezclar(0.05)
+        maximo = self._mezclar(0.60)
+        self.assertGreater(maximo, minimo * 8)
+
+    def test_sin_volumen_no_hay_musica(self):
+        self.assertLess(self._mezclar(0.0), self._mezclar(0.18) * 0.1)
+
+    def test_el_motor_admite_el_maximo_de_la_interfaz(self):
+        # El control llegaba solo a 40 mientras el motor aceptaba 60: se
+        # desaprovechaba la mitad útil del rango.
+        alto = self._mezclar(0.60)
+        recortado = self._mezclar(0.90)  # el motor lo limita a 0.60
+        self.assertAlmostEqual(alto, recortado, delta=alto * 0.02)
+
+
 if __name__ == "__main__":
     unittest.main()

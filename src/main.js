@@ -211,8 +211,8 @@ document.querySelector("#app").innerHTML = `
                     <button class="icon-button pressable" id="addSound" title="Agregar música">${icons.plus}</button>
                   </div>
                   <div class="slider-setting music-volume-setting">
-                    <div class="slider-title"><label>Volumen</label><output id="musicVolumeValue">18%</output></div>
-                    <input id="musicVolume" type="range" min="5" max="40" value="18" step="1">
+                    <div class="slider-title"><label>Volumen</label><output id="musicVolumeValue">30%</output></div>
+                    <input id="musicVolume" type="range" min="5" max="60" value="30" step="1">
                   </div>
                   <p class="music-status" id="musicStatus">Elige una pista y aplícala a esta locución ya generada.</p>
                   <button class="repair-library pressable" id="repairSounds" type="button">Reparar biblioteca de música</button>
@@ -934,7 +934,17 @@ function updateMusicUI(){
   const appliedId=state.result?.music_id||"";
   // Only "already in that state" and "busy" disable these. Missing
   // prerequisites are explained by updateResultMusic() on click.
-  el.applyMusic.disabled=state.musicBusy||(hasResult&&!!selected&&selected.id===appliedId);
+  // El volumen forma parte de lo aplicado, no solo la pista. Comparando solo
+  // la pista, subir el volumen dejaba "Aplicar" deshabilitado: el usuario movía
+  // el control, pulsaba, y no pasaba nada.
+  const volActual=Math.round(Number(el.musicVolume.value)||0);
+  // El volumen aplicado se guarda dentro de settings, no en el nivel superior.
+  const volGuardado=state.result?.settings?.music_volume
+    ?? state.result?.history?.settings?.music_volume
+    ?? state.result?.music_volume;
+  const volAplicado=Math.round(Number(volGuardado)*100);
+  const mismoVolumen=Number.isFinite(volAplicado)&&volAplicado===volActual;
+  el.applyMusic.disabled=state.musicBusy||(hasResult&&!!selected&&selected.id===appliedId&&mismoVolumen);
   el.removeMusic.disabled=state.musicBusy||(hasResult&&!appliedId);
   el.musicButton.classList.toggle("has-music",!!appliedId);
 
@@ -942,8 +952,10 @@ function updateMusicUI(){
     el.musicStatus.textContent="Genera una locución, o elige una del historial, para agregarle música.";
   }else if(selected){
     el.musicStatus.innerHTML=selected.id===appliedId
-      ? `<strong>${esc(selected.name)}</strong> ya está aplicada a este resultado.`
-      : `<strong>${esc(selected.name)}</strong> · ${el.musicVolume.value}% · pulsa "Aplicar música" para mezclarla.`;
+      ? (mismoVolumen
+          ? `<strong>${esc(selected.name)}</strong> al ${volAplicado}% ya está aplicada.`
+          : `<strong>${esc(selected.name)}</strong> está al ${volAplicado}% · pulsa "Aplicar música" para dejarla al ${volActual}%.`)
+      : `<strong>${esc(selected.name)}</strong> · ${volActual}% · pulsa "Aplicar música" para mezclarla.`;
   }else if(appliedId){
     el.musicStatus.innerHTML=`<strong>${esc(state.result.music_name||"Música")}</strong> aplicada. Elige otra pista o quítala.`;
   }else{
@@ -1240,7 +1252,7 @@ function loadPreferences(){
     const p=JSON.parse(localStorage.getItem("vsa-settings")||"{}");state.profile=p.profile||"natural";
     const base=PROFILE_VALUES[state.profile]||PROFILE_VALUES.natural;
     el.speed.value=p.speed??base.speed;el.stability.value=p.stability??base.stability;el.style.value=p.style??base.style;el.pitch.value=p.pitch??base.pitch;
-    el.output.value=p.output||"wav";el.outputRate.value=p.rate||"0";el.mode.value=p.mode||"auto";el.musicVolume.value=p.musicVolume||18;state.selectedSoundId="";
+    el.output.value=p.output||"wav";el.outputRate.value=p.rate||"0";el.mode.value=p.mode||"auto";el.musicVolume.value=p.musicVolume||30;state.selectedSoundId="";
     el.speakerBoost.classList.toggle("on",p.boost??base.boost);el.speakerBoost.setAttribute("aria-pressed",String(p.boost??base.boost));
     $$("#profileButtons button").forEach(b=>b.classList.toggle("active",b.dataset.profile===state.profile));
     const candidate=state.models.compatible.find(m=>m.id===(p.model_id||DEFAULT_MODEL_ID));
