@@ -102,7 +102,7 @@ document.querySelector("#app").innerHTML = `
             <strong id="updateTitle">Hay una versión nueva</strong>
             <small id="updateMeta"></small>
           </div>
-          <button class="secondary-button pressable" id="openUpdate" type="button">Ver la actualización</button>
+          <button class="secondary-button pressable" id="openUpdate" type="button">Descargar e instalar</button>
           <button class="icon-button small pressable" id="dismissUpdate" type="button" aria-label="Ocultar aviso">${icons.close}</button>
         </div>
 
@@ -2040,13 +2040,48 @@ function dismissAppUpdate(){
     if(state.appUpdate?.version)localStorage.setItem(UPDATE_DISMISSED_KEY,state.appUpdate.version);
   }catch{}
 }
+// Antes esto solo abría GitHub y el usuario tenía que encontrar el .exe,
+// bajarlo y ejecutarlo. Ahora la app se lo baja y lo lanza; abrir la página
+// queda como respaldo para Releases sin instalador o si algo falla.
 async function openAppUpdate(){
-  const url=state.appUpdate?.url;
-  if(!url)return;
+  const u=state.appUpdate;
+  if(!u)return;
+
+  if(!u.installer_url){
+    // Esa versión no publicó instalador: no hay nada que bajar.
+    try{await tauriInvoke("open_release_page",{url:u.url});}catch(e){toast(String(e),"error");}
+    return;
+  }
+
+  const boton=el.openUpdate, textoOriginal=boton.textContent;
+  boton.disabled=true;
+  const total=Number(u.installer_bytes)||0;
+  const pintar=p=>{boton.textContent=`Descargando… ${Math.round(p)}%`;};
+  pintar(0);
+
+  let quitar=null;
   try{
-    await tauriInvoke("open_release_page",{url});
+    // Mismo camino que usa la instalación del motor: el proyecto importa
+    // @tauri-apps/api/event, no depende de window.__TAURI__.
+    if(!tauriListenFn){
+      const event=await import("@tauri-apps/api/event");
+      tauriListenFn=event.listen;
+    }
+    quitar=await tauriListenFn("app-update-progress",e=>{
+      const d=e.payload||{};
+      pintar(d.percent||(total?d.downloaded_bytes/total*100:0));
+    });
+    const ruta=await tauriInvoke("download_app_update",{url:u.installer_url,filename:u.installer_name});
+    boton.textContent="Abriendo el instalador…";
+    toast("Descarga lista. Se abrirá el instalador y la app se cerrará.","success");
+    await tauriInvoke("run_app_installer",{path:ruta});
   }catch(error){
-    toast(String(error),"error");
+    boton.textContent=textoOriginal;
+    boton.disabled=false;
+    toast(`No se pudo actualizar sola: ${String(error)}. Se abrirá la página para descargarla a mano.`,"error");
+    try{await tauriInvoke("open_release_page",{url:u.url});}catch{}
+  }finally{
+    if(quitar)try{quitar();}catch{}
   }
 }
 

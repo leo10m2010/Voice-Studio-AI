@@ -145,6 +145,19 @@ struct AppUpdate {
     current_version: String,
     url: String,
     published_at: Option<String>,
+    /// Instalador de la Release, para bajarlo desde la app en vez de mandar al
+    /// usuario a GitHub. Es None si esa Release no publicó ningún .exe.
+    installer_url: Option<String>,
+    installer_name: Option<String>,
+    installer_bytes: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubAsset {
+    name: String,
+    browser_download_url: String,
+    #[serde(default)]
+    size: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -157,6 +170,8 @@ struct GithubRelease {
     draft: bool,
     #[serde(default)]
     prerelease: bool,
+    #[serde(default)]
+    assets: Vec<GithubAsset>,
 }
 
 /// True when `current` is strictly older than `candidate`, comparing numeric
@@ -1127,12 +1142,193 @@ async fn check_app_update() -> Result<Option<AppUpdate>, String> {
         return Ok(None);
     }
 
+    // El instalador de Windows es el único asset que sabemos ejecutar.
+    let instalador = release
+        .assets
+        .into_iter()
+        .find(|asset| asset.name.to_ascii_lowercase().ends_with("-setup.exe"));
+
     Ok(Some(AppUpdate {
         version: latest,
         current_version: current,
         url: release.html_url,
         published_at: release.published_at,
+        installer_bytes: instalador.as_ref().map(|a| a.size).unwrap_or(0),
+        installer_name: instalador.as_ref().map(|a| a.name.clone()),
+        installer_url: instalador.map(|a| a.browser_download_url),
     }))
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct AppUpdateProgress {
+    downloaded_bytes: u64,
+    total_bytes: u64,
+    percent: f64,
+}
+
+/// Carpeta donde se deja el instalador descargado.
+fn app_update_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|error| error.to_string())?
+        .join("updates");
+    fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+    Ok(dir)
+}
+
+/// Descarga el instalador de la versión nueva dentro de la app.
+///
+/// Antes solo se abría la página de GitHub y el usuario tenía que encontrar el
+/// .exe, bajarlo y ejecutarlo a mano.
+#[tauri::command]
+async fn download_app_update(app: AppHandle, url: String, filename: String) -> Result<String, String> {
+    // La URL llega del frontend y acaba en un ejecutable, así que se exige que
+    // sea un asset de las Releases de este repositorio y nada más.
+    let permitido = format!("https://github.com/{GITHUB_REPO}/releases/download/");
+    if !url.starts_with(&permitido) {
+        return Err("Ese instalador no viene de las versiones oficiales.".into());
+    }
+
+    let limpio = Path::new(&filename)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .to_string();
+    if !limpio.to_ascii_lowercase().ends_with("-setup.exe") {
+        return Err("Solo se descarga el instalador de Windows.".into());
+    }
+
+    let carpeta = app_update_dir(&app)?;
+    let destino = carpeta.join(&limpio);
+    let parcial = carpeta.join(format!("{limpio}.parcial"));
+    let _ = fs::remove_file(&parcial);
+
+    let app_evento = app.clone();
+    let destino_hilo = destino.clone();
+    let parcial_hilo = parcial.clone();
+
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let cliente = http_client()?;
+        let mut respuesta = cliente
+            .get(&url)
+            .send()
+            .map_err(|error| format!("No se pudo descargar: {error}"))?
+            .error_for_status()
+            .map_err(|error| format!("El servidor respondió: {error}"))?;
+
+        let total = respuesta.content_length().unwrap_or(0);
+        let mut archivo = File::create(&parcial_hilo).map_err(|error| error.to_string())?;
+        let mut buffer = vec![0u8; 256 * 1024];
+        let mut bajado = 0u64;
+        let mut ultimo_aviso = 0u64;
+
+        loop {
+            let leidos = respuesta
+                .read(&mut buffer)
+                .map_err(|error| format!("Se cortó la descarga: {error}"))?;
+            if leidos == 0 {
+                break;
+            }
+            archivo
+                .write_all(&buffer[..leidos])
+                .map_err(|error| format!("No se pudo escribir el instalador: {error}"))?;
+            bajado = bajado.saturating_add(leidos as u64);
+
+            // Un evento por megabyte: suficiente para una barra fluida sin
+            // inundar el webview.
+            if bajado - ultimo_aviso > 1024 * 1024 {
+                ultimo_aviso = bajado;
+                let _ = app_evento.emit(
+                    "app-update-progress",
+                    AppUpdateProgress {
+                        downloaded_bytes: bajado,
+                        total_bytes: total,
+                        percent: if total > 0 {
+                            (bajado as f64 / total as f64 * 100.0).min(100.0)
+                        } else {
+                            0.0
+                        },
+                    },
+                );
+            }
+        }
+
+        drop(archivo);
+        if total > 0 && bajado != total {
+            let _ = fs::remove_file(&parcial_hilo);
+            return Err("La descarga quedó incompleta.".into());
+        }
+
+        // Se mueve al final: así una descarga cortada no deja un .exe a medias
+        // que alguien pueda ejecutar.
+        let _ = fs::remove_file(&destino_hilo);
+        fs::rename(&parcial_hilo, &destino_hilo).map_err(|error| error.to_string())?;
+
+        let _ = app_evento.emit(
+            "app-update-progress",
+            AppUpdateProgress {
+                downloaded_bytes: bajado,
+                total_bytes: total.max(bajado),
+                percent: 100.0,
+            },
+        );
+        Ok(())
+    })
+    .await
+    .map_err(|error| format!("La descarga se interrumpió: {error}"))??;
+
+    Ok(destino.to_string_lossy().to_string())
+}
+
+/// Ejecuta un instalador que descargó esta app y cierra la ventana.
+///
+/// Solo acepta rutas dentro de la carpeta de actualizaciones: el argumento
+/// acaba en un lanzador de procesos, así que cualquier otra cosa se rechaza.
+#[tauri::command]
+fn run_app_installer(app: AppHandle, path: String) -> Result<(), String> {
+    let carpeta = app_update_dir(&app)?;
+    let ruta = PathBuf::from(&path);
+    let dentro = ruta
+        .canonicalize()
+        .ok()
+        .zip(carpeta.canonicalize().ok())
+        .map(|(archivo, base)| archivo.starts_with(&base))
+        .unwrap_or(false);
+
+    if !dentro {
+        return Err("Ese instalador no lo descargó la aplicación.".into());
+    }
+    if !ruta
+        .file_name()
+        .and_then(|v| v.to_str())
+        .map(|v| v.to_ascii_lowercase().ends_with("-setup.exe"))
+        .unwrap_or(false)
+    {
+        return Err("Ese archivo no es el instalador.".into());
+    }
+
+    // El motor se queda sin dueño si la app muere durante la instalación.
+    {
+        let process = app.state::<EngineProcess>();
+        let expected_stop = app.state::<EngineExpectedStop>();
+        if let Err(error) = terminate_engine(process.inner(), expected_stop.inner()) {
+            println!("[update] no se pudo detener el motor: {error}");
+        }
+    }
+
+    #[cfg(windows)]
+    Command::new(&ruta)
+        .spawn()
+        .map_err(|error| format!("No se pudo abrir el instalador: {error}"))?;
+    #[cfg(not(windows))]
+    return Err("La instalación automática solo está disponible en Windows.".into());
+
+    #[cfg(windows)]
+    {
+        app.exit(0);
+        Ok(())
+    }
 }
 
 /// Opens a release page in the system browser.
@@ -1558,7 +1754,9 @@ pub fn run() {
             uninstall_engine,
             check_app_update,
             open_release_page,
-            save_output
+            save_output,
+            download_app_update,
+            run_app_installer
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {
