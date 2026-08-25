@@ -1139,6 +1139,74 @@ async fn check_app_update() -> Result<Option<AppUpdate>, String> {
 ///
 /// Restricted to this repository's own URLs: the argument reaches a process
 /// launcher, so anything else is refused rather than trusted.
+/// Guarda una locución en la carpeta de Descargas del usuario.
+///
+/// El botón "Guardar audio" era un `<a download>` apuntando al motor. En
+/// escritorio la app corre en tauri://localhost y el audio lo sirve
+/// http://127.0.0.1:8765, y el atributo `download` se ignora entre orígenes
+/// distintos: el webview intentaba navegar, Tauri lo bloqueaba, y el botón no
+/// hacía nada. Copiarlo desde Rust evita del todo esa maquinaria.
+#[tauri::command]
+async fn save_output(app: AppHandle, url: String, filename: String) -> Result<String, String> {
+    // La URL viene del frontend, así que se acota a lo que sirve el motor
+    // local en vez de descargar cualquier cosa que llegue.
+    let prefijo = format!("http://127.0.0.1:{ENGINE_PORT}/api/outputs/");
+    if !url.starts_with(&prefijo) {
+        return Err("Esa dirección no es una locución del motor local.".into());
+    }
+
+    // Nada de rutas: solo el nombre, y con extensión conocida.
+    let limpio = Path::new(&filename)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("locucion.wav")
+        .to_string();
+    let extension = Path::new(&limpio)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if !matches!(extension.as_str(), "wav" | "mp3" | "flac") {
+        return Err("Solo se pueden guardar audios generados por la app.".into());
+    }
+
+    let carpeta = app
+        .path()
+        .download_dir()
+        .map_err(|error| format!("No se encontró la carpeta de Descargas: {error}"))?;
+    fs::create_dir_all(&carpeta).map_err(|error| error.to_string())?;
+
+    // Sin pisar lo que ya haya: se numera como hace el Explorador.
+    let tallo = Path::new(&limpio)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("locucion")
+        .to_string();
+    let mut destino = carpeta.join(&limpio);
+    let mut copia = 1;
+    while destino.exists() {
+        destino = carpeta.join(format!("{tallo} ({copia}).{extension}"));
+        copia += 1;
+    }
+
+    let cliente = http_client()?;
+    let respuesta = tauri::async_runtime::spawn_blocking(move || {
+        cliente
+            .get(&url)
+            .send()
+            .and_then(|r| r.error_for_status())
+            .and_then(|r| r.bytes())
+    })
+    .await
+    .map_err(|error| format!("La descarga se interrumpió: {error}"))?
+    .map_err(|error| format!("No se pudo leer la locución: {error}"))?;
+
+    fs::write(&destino, &respuesta)
+        .map_err(|error| format!("No se pudo escribir en Descargas: {error}"))?;
+
+    Ok(destino.to_string_lossy().to_string())
+}
+
 #[tauri::command]
 fn open_release_page(url: String) -> Result<(), String> {
     let allowed = format!("https://github.com/{GITHUB_REPO}/");
@@ -1489,7 +1557,8 @@ pub fn run() {
             restart_engine,
             uninstall_engine,
             check_app_update,
-            open_release_page
+            open_release_page,
+            save_output
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {

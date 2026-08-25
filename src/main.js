@@ -1456,13 +1456,53 @@ async function setResultAudio(url,filename,voiceName,history=null){
   state.result=history
     ? {...history,history,url,filename}
     : {...(state.result||{}),url,filename};
-  el.audio.src=url;el.download.href=url;el.download.download=filename||"locucion.wav";el.download.classList.remove("disabled");
+  el.audio.src=url;el.download.download=filename||"locucion.wav";el.download.classList.remove("disabled");
   el.bottomVoice.textContent=voiceName||state.voice?.name||"Resultado";
   el.player.classList.add("visible");el.transport.classList.add("has-result");
   state.selectedSoundId=history?.music_id||"";
   updateMusicUI();
   await buildWaveform(url);
   try{await el.audio.play();el.playerPlay.innerHTML=icons.pause}catch{}
+}
+// Guardar la locución.
+//
+// El botón era un <a download> apuntando al motor, y eso no descarga nada: la
+// app corre en un origen (tauri://localhost, o localhost:5173 en desarrollo) y
+// el audio lo sirve http://127.0.0.1:8765, y el atributo `download` se ignora
+// entre orígenes distintos. El navegador intentaba navegar y Tauri lo
+// bloqueaba, así que el botón no hacía absolutamente nada.
+async function saveResult(){
+  // state.result.url ya viene absoluta (setResultAudio la recibe así desde
+  // generar y desde el historial). Anteponerle API otra vez formaba
+  // "http://…8765http://…8765/api/outputs/…" y fetch lo rechazaba.
+  const bruta=state.result?.url||"";
+  const url=bruta?(/^https?:/i.test(bruta)?bruta:`${API}${bruta}`):null;
+  const nombre=el.download.download||"locucion.wav";
+  if(!url)return toast("Genera o elige una locución primero.","error");
+
+  if(isDesktop()){
+    // En escritorio lo copia Rust a Descargas: no depende de la maquinaria de
+    // descargas del webview, que es justo la que fallaba.
+    try{
+      const destino=await tauriInvoke("save_output",{url,filename:nombre});
+      toast(`Guardado en ${destino}`,"success");
+    }catch(e){toast(String(e),"error");}
+    return;
+  }
+
+  // En navegador: se trae el audio y se descarga desde un blob, que sí es del
+  // mismo origen y respeta `download`.
+  try{
+    const respuesta=await fetch(`${url}${url.includes("?")?"&":"?"}download=1`);
+    if(!respuesta.ok)throw new Error(`El motor respondió ${respuesta.status}`);
+    const blob=await respuesta.blob();
+    const objeto=URL.createObjectURL(blob);
+    const a=document.createElement("a");
+    a.href=objeto;a.download=nombre;
+    document.body.appendChild(a);a.click();a.remove();
+    setTimeout(()=>URL.revokeObjectURL(objeto),10000);
+    toast("Audio guardado.","success");
+  }catch(e){toast(`No se pudo guardar: ${e.message}`,"error");}
 }
 async function buildWaveform(url){
   if(state.waveformUrl===url&&state.waveform.length){drawWaveform();return}
@@ -2243,6 +2283,7 @@ el.syncVoices.onclick=async()=>{
     }
   }catch(e){toast(e.message,"error");}finally{el.syncVoices.disabled=false;}
 };
+el.download.onclick=e=>{e.preventDefault();if(!el.download.classList.contains("disabled"))saveResult();};
 el.speakerBoost.onclick=()=>{toggle(el.speakerBoost);savePreferences()};
 // Transcribir la referencia no mejora la fidelidad de forma medible (ICL y
 // huella de voz empatan emparejando por semilla), así que el modelo de ~250 MB

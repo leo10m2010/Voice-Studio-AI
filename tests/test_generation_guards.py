@@ -1138,5 +1138,49 @@ class AsrDescargaTest(unittest.TestCase):
         self.assertEqual(server.asr_status()["estado"], server.ASR_ESTADO_APAGADO)
 
 
+class GuardarAudioTest(unittest.TestCase):
+    """
+    "Guardar audio" no guardaba nada. Era un <a download> apuntando al motor, y
+    el atributo se ignora entre orígenes distintos: la app corre en
+    tauri://localhost y el audio lo sirve http://127.0.0.1:8765.
+
+    El arreglo del navegador es traerse el audio y descargarlo desde un blob;
+    esta cabecera es la otra mitad, para que el archivo llegue marcado como
+    adjunto y con su nombre.
+    """
+
+    def setUp(self):
+        import tempfile
+
+        self.carpeta = tempfile.TemporaryDirectory()
+        self.addCleanup(self.carpeta.cleanup)
+        self.salidas = Path(self.carpeta.name)
+        self.addCleanup(setattr, server, "OUTPUTS_DIR", server.OUTPUTS_DIR)
+        server.OUTPUTS_DIR = self.salidas
+        (self.salidas / "locucion.wav").write_bytes(b"RIFF0000WAVE")
+
+    def test_el_reproductor_no_recibe_adjunto(self):
+        # Marcarlo como adjunto siempre rompería reproducir y dibujar la onda.
+        respuesta = server.output_audio("locucion.wav")
+        self.assertIsNone((respuesta.headers or {}).get("content-disposition"))
+
+    def test_guardar_lo_marca_como_adjunto_con_su_nombre(self):
+        respuesta = server.output_audio("locucion.wav", download=1)
+        cabecera = respuesta.headers.get("content-disposition", "")
+        self.assertIn("attachment", cabecera)
+        self.assertIn('filename="locucion.wav"', cabecera)
+
+    def test_no_deja_salir_de_la_carpeta_de_salidas(self):
+        # El nombre llega por URL: se queda con el último tramo, nunca una ruta.
+        with self.assertRaises(server.HTTPException) as caught:
+            server.output_audio("../../secreto.wav", download=1)
+        self.assertEqual(caught.exception.status_code, 404)
+
+    def test_un_archivo_que_no_existe_da_404(self):
+        with self.assertRaises(server.HTTPException) as caught:
+            server.output_audio("no_existe.wav")
+        self.assertEqual(caught.exception.status_code, 404)
+
+
 if __name__ == "__main__":
     unittest.main()

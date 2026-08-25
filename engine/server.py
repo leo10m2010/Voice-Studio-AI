@@ -2723,13 +2723,33 @@ def sound_audio(sound_id: str):
 
 
 @app.get("/api/outputs/{filename}")
-def output_audio(filename: str):
+def output_audio(filename: str, download: int = 0):
+    """
+    Sirve una locución. Con ?download=1 la marca como adjunto.
+
+    Sin esa cabecera el navegador la reproduce en vez de guardarla, así que
+    "Guardar audio" no guardaba nada. El reproductor sigue pidiéndola sin el
+    parámetro, que es lo que necesita para reproducir y dibujar la onda.
+    """
     safe = Path(filename).name
     path = OUTPUTS_DIR / safe
     if not path.exists():
         raise HTTPException(status_code=404, detail="Resultado no encontrado.")
     media = AUDIO_MEDIA_TYPES.get(path.suffix.lower(), "audio/wav")
-    return FileResponse(path, media_type=media)
+
+    headers = None
+    if download:
+        # filename* en UTF-8 por si algún día el nombre lleva acentos; el
+        # filename simple queda como respaldo para clientes antiguos.
+        from urllib.parse import quote
+
+        headers = {
+            "Content-Disposition": (
+                f'attachment; filename="{safe}"; '
+                f"filename*=UTF-8''{quote(safe)}"
+            )
+        }
+    return FileResponse(path, media_type=media, headers=headers)
 
 
 async def save_upload(file: UploadFile, destination_dir: Path) -> Path:
