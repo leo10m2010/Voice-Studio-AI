@@ -2,7 +2,7 @@ import "./styles.css";
 
 const API = "http://127.0.0.1:8765";
 const DEFAULT_MODEL_ID = "Qwen/Qwen3-TTS-12Hz-0.6B-Base";
-const REQUIRED_ENGINE_VERSION = "1.0.8";
+const REQUIRED_ENGINE_VERSION = "1.0.9";
 
 const icons = {
   wave: `<svg viewBox="0 0 24 24"><path d="M4 13v-2M8 17V7M12 20V4M16 16V8M20 13v-2"/></svg>`,
@@ -214,6 +214,7 @@ document.querySelector("#app").innerHTML = `
                     <div class="slider-title"><label>Volumen</label><output id="musicVolumeValue">30%</output></div>
                     <input id="musicVolume" type="range" min="5" max="60" value="30" step="1">
                   </div>
+                  <p class="music-status">Se monta como un spot: la música entra sola unos segundos, baja a este volumen bajo la voz y cierra con unos segundos más.</p>
                   <p class="music-status" id="musicStatus">Elige una pista y aplícala a esta locución ya generada.</p>
                   <button class="repair-library pressable" id="repairSounds" type="button">Reparar biblioteca de música</button>
                   <div class="music-popover-actions">
@@ -1736,7 +1737,7 @@ function configureEngineIntro(mode="install"){
   el.setupIntroKicker.textContent=updating?"ACTUALIZACIÓN REQUERIDA":"PRIMER INICIO";
   el.setupIntroTitle.textContent=updating?"Actualicemos el motor local.":"Preparamos el estudio por ti.";
   el.setupIntroBody.textContent=updating
-    ? `La versión ${REQUIRED_ENGINE_VERSION} corrige la generación con tarjeta gráfica y el clonado de voces con transcripción. Tus voces y modelos guardados se conservarán.`
+    ? `La versión ${REQUIRED_ENGINE_VERSION} arregla "Guardar audio" y monta la música como un spot: entra sola, baja bajo la voz y cierra con unos segundos. Tus voces y modelos guardados se conservarán.`
     : "Voice Studio AI descargará su motor de voz de forma segura. No necesitas instalar Python, PyTorch ni abrir una terminal.";
   el.installEngineButton.textContent=updating?"Actualizar motor":"Preparar Voice Studio AI";
 }
