@@ -94,18 +94,76 @@ def _normalize_music(music: np.ndarray, target_dbfs: float = -18.0) -> np.ndarra
     return (music * gain).astype(np.float32)
 
 
-def _fade_envelope(length: int, sample_rate: int) -> np.ndarray:
-    envelope = np.ones(length, dtype=np.float32)
-    if length <= 1:
-        return envelope
+_INTRO_SECONDS = 2.8
+"""Music alone before the voice comes in (the classic radio-spot opener)."""
 
-    fade_in = min(length // 3, max(1, int(sample_rate * 0.22)))
-    fade_out = min(length // 3, max(1, int(sample_rate * 0.45)))
+_OUTRO_SECONDS = 3.4
+"""Music alone after the voice ends, fade-out included."""
 
+_INTRO_FADE_SECONDS = 0.35
+_DUCK_SECONDS = 0.50
+_LIFT_SECONDS = 0.60
+_OUTRO_FADE_SECONDS = 1.80
+
+_LEAD_OVER_BED = 3.2
+"""
+How much louder the exposed intro/outro is than the bed under the voice
+(~10 dB, the usual ducking depth on radio). The user's volume stays the
+level they hear under the voice, which is the one they actually tune;
+below 2.5x the opener came out clearly quieter than the voice and did not
+read as a spot opener at all.
+"""
+
+_LEAD_CEILING = 1.30
+
+
+def _ramp(start: float, end: float, length: int) -> np.ndarray:
+    if length <= 0:
+        return np.zeros(0, dtype=np.float32)
+    if length == 1:
+        return np.full(1, end, dtype=np.float32)
+
+    # Raised cosine: no audible corner at either end of the move.
+    t = np.linspace(0.0, 1.0, length, dtype=np.float32)
+    shape = (1.0 - np.cos(np.pi * t)) / 2.0
+    return (start + (end - start) * shape).astype(np.float32)
+
+
+def _spot_envelope(
+    intro_samples: int,
+    voice_samples: int,
+    outro_samples: int,
+    sample_rate: int,
+    bed_level: float,
+    lead_level: float,
+) -> np.ndarray:
+    """
+    Spot shape: music on its own, duck under the voice, come back up and
+    fade out at the end.
+    """
+    total = intro_samples + voice_samples + outro_samples
+    envelope = np.full(total, bed_level, dtype=np.float32)
+
+    duck = min(int(sample_rate * _DUCK_SECONDS), intro_samples)
+    lift = min(int(sample_rate * _LIFT_SECONDS), outro_samples)
+    fade_in = min(int(sample_rate * _INTRO_FADE_SECONDS), intro_samples - duck)
+    fade_out = min(int(sample_rate * _OUTRO_FADE_SECONDS), outro_samples - lift)
+
+    duck_start = intro_samples - duck
+    envelope[:duck_start] = lead_level
     if fade_in > 1:
-        envelope[:fade_in] = np.linspace(0.0, 1.0, fade_in, dtype=np.float32)
+        envelope[:fade_in] = _ramp(0.0, lead_level, fade_in)
+    if duck > 0:
+        envelope[duck_start:intro_samples] = _ramp(lead_level, bed_level, duck)
+
+    voice_end = intro_samples + voice_samples
+    envelope[intro_samples:voice_end] = bed_level
+
+    if lift > 0:
+        envelope[voice_end:voice_end + lift] = _ramp(bed_level, lead_level, lift)
+    envelope[voice_end + lift:] = lead_level
     if fade_out > 1:
-        envelope[-fade_out:] = np.linspace(1.0, 0.0, fade_out, dtype=np.float32)
+        envelope[total - fade_out:] = _ramp(lead_level, 0.0, fade_out)
 
     return envelope
 
@@ -117,15 +175,19 @@ def mix_voice_with_music(
     music_volume: float = 0.18,
 ) -> np.ndarray:
     """
-    Mix a generated mono voice with stereo background music.
+    Mix a generated mono voice with stereo background music, arranged as a
+    radio spot: the music opens on its own for a couple of seconds, ducks
+    under the voice, and comes back up for a few seconds at the end before
+    fading out.
 
     Properties:
-    - output duration exactly matches the generated voice;
+    - output = intro + voice + outro, so it is longer than the voice;
     - music is resampled to the voice sample rate;
     - short music loops automatically;
     - long music is trimmed;
-    - music gets a short fade-in/out;
     - music level is normalized before applying the user volume;
+    - the user volume is the bed level under the voice; intro/outro sit above it;
+    - with volume 0 there is nothing to expose, so no intro/outro is added;
     - voice is centered in stereo;
     - final mix is softly limited to prevent clipping.
 
@@ -142,7 +204,18 @@ def mix_voice_with_music(
     if music.shape[1] == 0:
         raise RuntimeError("La música seleccionada está vacía.")
 
-    target_length = int(voice.shape[0])
+    bed_level = float(np.clip(music_volume, 0.0, 0.60))
+    lead_level = min(bed_level * _LEAD_OVER_BED, _LEAD_CEILING)
+
+    voice_length = int(voice.shape[0])
+    if bed_level <= 0.0:
+        # Sin música audible, el intro y la cola serían solo silencio pegado.
+        intro_samples = outro_samples = 0
+    else:
+        intro_samples = int(sample_rate * _INTRO_SECONDS)
+        outro_samples = int(sample_rate * _OUTRO_SECONDS)
+
+    target_length = intro_samples + voice_length + outro_samples
 
     if music.shape[1] < target_length:
         repeats = int(np.ceil(target_length / music.shape[1]))
@@ -151,9 +224,23 @@ def mix_voice_with_music(
     music = music[:, :target_length]
     music = _normalize_music(music)
 
-    volume = float(np.clip(music_volume, 0.0, 0.60))
-    music *= volume
-    music *= _fade_envelope(target_length, sample_rate)[None, :]
+    music *= _spot_envelope(
+        intro_samples=intro_samples,
+        voice_samples=voice_length,
+        outro_samples=outro_samples,
+        sample_rate=sample_rate,
+        bed_level=bed_level,
+        lead_level=lead_level,
+    )[None, :]
+
+    if intro_samples or outro_samples:
+        voice = np.concatenate(
+            [
+                np.zeros(intro_samples, dtype=np.float32),
+                voice,
+                np.zeros(outro_samples, dtype=np.float32),
+            ]
+        )
 
     voice_stereo = np.stack([voice, voice], axis=0)
     mixed = voice_stereo + music
