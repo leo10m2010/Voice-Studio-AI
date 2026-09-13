@@ -205,6 +205,38 @@ Copiar diagnóstico. Causas frecuentes, en orden:
 La descarga viene de Hugging Face. En una red corporativa suele estar
 bloqueada. El diagnóstico muestra `Modelo <id>: error` con el detalle.
 
+### La descarga parece incompleta o se queda en «Instalando»
+
+El instalador tenía dos fallos: podía aceptar una caché con `config.json` y
+un solo archivo de pesos (incluso si era del tokenizador de voz), y podía
+bloquearse al iniciar una descarga cuando ya existían archivos parciales.
+También podía contar dos veces los pesos enlazados de la caché, haciendo que
+el tamaño mostrado pareciera mayor de lo realmente descargado.
+
+El motor **1.0.10** (requerido por la app **0.8.8**) comprueba las configuraciones, los archivos del tokenizador
+de texto, los del tokenizador de voz y todos los fragmentos de pesos declarados
+en los índices. Para los archivos `safetensors`, comprueba la cabecera y que la
+longitud coincida con los datos declarados. Esto detecta truncamientos; no es
+una comprobación criptográfica de todo el contenido.
+
+Para recuperar una instalación con **el motor que incluya esta corrección**:
+
+1. Reinicia la aplicación si la descarga anterior quedó bloqueada.
+2. Abre **Modelos** y pulsa **Instalar modelo** o **Reintentar**.
+3. Los archivos parciales se reanudan mediante Hugging Face. Si quedan archivos
+   inválidos en la caché, el instalador fuerza una nueva descarga de esos archivos
+   y vuelve a validarlos antes de marcar el modelo como instalado.
+4. Si falla, comprueba el espacio libre y la conexión; usa **Copiar diagnóstico**
+   para obtener el error concreto y los nombres de archivos que no pasan la validación.
+
+No hace falta borrar toda la carpeta `huggingface` para reintentar. Los restos
+`.incomplete` de otra revisión ya no impiden reconocer una revisión completa.
+El tamaño mostrado durante la descarga es orientativo, no una prueba de integridad.
+
+Modificar el repositorio no actualiza el motor `.exe` ya instalado: hay que
+ejecutar el motor desde el código actualizado o empaquetar y distribuir una
+nueva versión del motor.
+
 ## "El motor quedó bloqueado"
 
 `generate_voice_clone()` de Qwen3-TTS puede colgarse indefinidamente con

@@ -76,6 +76,10 @@ jobs:
           python -c "from pathlib import Path; p=Path('engine/audio_ingest.py'); compile(p.read_text(encoding='utf-8'), str(p), 'exec'); print('audio_ingest.py OK')"
           python -m py_compile .\scripts\package_engine_assets.py
 
+      - name: Probar descarga y recuperación de modelos
+        shell: pwsh
+        run: python -m unittest discover -s tests -p test_model_install.py -v
+
       - name: Verificar ownership de engine_catalog
         shell: pwsh
         run: |

@@ -12,18 +12,78 @@ from typing import Callable, Mapping, Optional
 Downloader = Callable[..., str]
 
 
-def model_snapshot_complete(snapshot_path: Path) -> bool:
-    """Return True only for a local snapshot that contains config and weights."""
+def snapshot_problems(snapshot_path: Path) -> list[str]:
+    """Validate local loading dependencies and safetensors lengths, without loading tensors."""
     snapshot = Path(snapshot_path)
-    if not snapshot.is_dir() or not (snapshot / "config.json").is_file():
-        return False
+    problems: set[str] = set()
 
-    weight_patterns = ("*.safetensors", "pytorch_model*.bin")
-    return any(
-        path.is_file()
-        for pattern in weight_patterns
-        for path in snapshot.rglob(pattern)
-    )
+    def check_file(relative: str) -> Optional[dict]:
+        path = snapshot / relative
+        try:
+            if path.stat().st_size == 0:
+                raise ValueError("empty file")
+            if path.suffix == ".json":
+                data = json.loads(path.read_text(encoding="utf-8"))
+                if not isinstance(data, dict):
+                    raise ValueError("expected JSON object")
+                return data
+        except (OSError, ValueError, TypeError):
+            problems.add(relative)
+        return None
+
+    config = check_file("config.json") or {}
+    directories = [snapshot]
+    if config.get("model_type") == "qwen3_tts":
+        for relative in (
+            "generation_config.json", "preprocessor_config.json", "tokenizer_config.json",
+            "vocab.json", "merges.txt", "speech_tokenizer/config.json",
+            "speech_tokenizer/configuration.json", "speech_tokenizer/preprocessor_config.json",
+        ):
+            check_file(relative)
+        directories.append(snapshot / "speech_tokenizer")
+
+    for directory in directories:
+        weights = set(directory.glob("*.safetensors")) | set(directory.glob("pytorch_model*.bin"))
+        for index in directory.glob("*.index.json"):
+            data = check_file(index.relative_to(snapshot).as_posix()) or {}
+            mapping = data.get("weight_map")
+            if not isinstance(mapping, dict) or not mapping:
+                problems.add(index.relative_to(snapshot).as_posix())
+                continue
+            for filename in mapping.values():
+                if not isinstance(filename, str) or Path(filename).name != filename:
+                    problems.add(index.relative_to(snapshot).as_posix())
+                    continue
+                weights.add(directory / filename)
+        if not weights:
+            problems.add((directory / "model.safetensors").relative_to(snapshot).as_posix())
+        for path in weights:
+            relative = path.relative_to(snapshot).as_posix()
+            check_file(relative)
+            if path.suffix != ".safetensors" or relative in problems:
+                continue
+            try:
+                with path.open("rb") as stream:
+                    prefix = stream.read(8)
+                    header_size = int.from_bytes(prefix, "little")
+                    if len(prefix) != 8 or not 0 < header_size <= 100_000_000:
+                        raise ValueError("invalid safetensors header")
+                    header = json.loads(stream.read(header_size))
+                offsets = [value["data_offsets"] for key, value in header.items() if key != "__metadata__"]
+                if not offsets or any(
+                    len(pair) != 2 or any(type(n) is not int for n in pair)
+                    or not 0 <= pair[0] <= pair[1] for pair in offsets
+                ):
+                    raise ValueError("invalid tensor offsets")
+                if path.stat().st_size != 8 + header_size + max(pair[1] for pair in offsets):
+                    raise ValueError("truncated tensor data")
+            except (OSError, ValueError, TypeError, KeyError, AttributeError):
+                problems.add(relative)
+    return sorted(problems)
+
+
+def model_snapshot_complete(snapshot_path: Path) -> bool:
+    return not snapshot_problems(snapshot_path)
 
 
 class ModelInstallRegistry:
@@ -66,7 +126,7 @@ class ModelInstallRegistry:
             record = json.loads(self._record_path(model_id).read_text(encoding="utf-8"))
         except (OSError, ValueError, TypeError):
             return None
-        if record.get("model_id") != model_id:
+        if not isinstance(record, dict) or record.get("model_id") != model_id:
             return None
         return record
 
@@ -90,7 +150,7 @@ class ModelInstallRegistry:
         os.replace(temporary, destination)
         return record
 
-    def _snapshot_download(self, model_id: str, *, local_files_only: bool) -> Path:
+    def _snapshot_download(self, model_id: str, *, local_files_only: bool, **options) -> Path:
         downloader = self._downloader
         if downloader is None:
             from huggingface_hub import snapshot_download
@@ -100,6 +160,7 @@ class ModelInstallRegistry:
             repo_id=model_id,
             cache_dir=str(self.cache_dir),
             local_files_only=local_files_only,
+            **options,
         )
         return Path(result)
 
@@ -112,10 +173,6 @@ class ModelInstallRegistry:
             snapshot = Path(str(record.get("snapshot_path") or ""))
             if self._within_cache(snapshot) and model_snapshot_complete(snapshot):
                 return snapshot
-
-        repo_cache = self._repo_cache_dir(model_id)
-        if repo_cache.exists() and any(repo_cache.rglob("*.incomplete")):
-            return None
 
         try:
             snapshot = self._snapshot_download(model_id, local_files_only=True)
@@ -156,9 +213,12 @@ class ModelInstallRegistry:
                 return cached
 
         total = 0
+        seen: set[Path] = set()
         for path in root.rglob("*"):
             try:
-                if path.is_file():
+                resolved = path.resolve()
+                if path.is_file() and resolved not in seen:
+                    seen.add(resolved)
                     total += path.stat().st_size
             except OSError:
                 continue
@@ -230,6 +290,8 @@ class ModelInstallRegistry:
                 self._states[model_id] = installed
             return installed
 
+        # Walking the cache acquires _lock internally: do it before the state lock.
+        downloaded_bytes = self._downloaded_bytes(model_id, live=True)
         with self._lock:
             current = self._states.get(model_id)
             if current and current.get("state") == "downloading":
@@ -246,7 +308,7 @@ class ModelInstallRegistry:
                 "message": "Descargando archivos desde Hugging Face. Puedes seguir usando la aplicación.",
                 "snapshot_path": None,
                 "installed_at": None,
-                "downloaded_bytes": self._downloaded_bytes(model_id),
+                "downloaded_bytes": downloaded_bytes,
                 "expected_bytes": self._expected_bytes(model_id),
                 "error": None,
             }
@@ -265,6 +327,17 @@ class ModelInstallRegistry:
     def _install_worker(self, model_id: str) -> None:
         try:
             snapshot = self._snapshot_download(model_id, local_files_only=False)
+            problems = snapshot_problems(snapshot)
+            if problems:
+                # Hub trusts existing final files. Explicitly replace only the bad
+                # dependencies, at the same revision; keep valid GB-sized weights.
+                snapshot = self._snapshot_download(
+                    model_id, local_files_only=False, revision=snapshot.name,
+                    allow_patterns=problems, force_download=True,
+                )
+                problems = snapshot_problems(snapshot)
+                if problems:
+                    raise RuntimeError("Archivos incompletos o inválidos: " + ", ".join(problems))
             record = self._write_record(model_id, snapshot)
             # The download just changed what is on disk; drop the memoized size
             # so the finished state reports the real total.
@@ -272,12 +345,13 @@ class ModelInstallRegistry:
             state = self._installed_state(model_id, snapshot)
             state["installed_at"] = record["installed_at"]
         except Exception as exc:
+            self._invalidate_size(model_id)
             detail = f"{type(exc).__name__}: {exc}".strip()
             state = {
                 "model_id": model_id,
                 "state": "error",
                 "installed": False,
-                "message": "No se pudo completar la descarga. Revisa tu conexión y vuelve a intentarlo.",
+                "message": "No se pudo completar o validar la descarga. Revisa la conexión y el espacio libre; pulsa Reintentar para reanudarla.",
                 "snapshot_path": None,
                 "installed_at": None,
                 "downloaded_bytes": self._downloaded_bytes(model_id),
